@@ -1,3 +1,19 @@
+// PureCam - An iOS camera app with AI-powered exposure control
+// Copyright (C) 2025 nainajnahO
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import SwiftUI
 import AVFoundation
 
@@ -32,16 +48,10 @@ struct CameraPreview: UIViewRepresentable {
     private func updateRotation(for layer: AVCaptureVideoPreviewLayer) {
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
         let orientation = windowScene.effectiveGeometry.interfaceOrientation
-        
-        // Map UI orientation to the required camera rotation angle (standard for Back Camera)
-        let angle: CGFloat = switch orientation {
-        case .portrait: 90
-        case .portraitUpsideDown: 270
-        case .landscapeLeft: 180 // Home button left
-        case .landscapeRight: 0  // Home button right
-        default: 90
-        }
-        
+
+        // Use OrientationMapper for consistent orientation handling
+        let angle = OrientationMapper.rotationAngle(for: orientation)
+
         if layer.connection?.isVideoRotationAngleSupported(angle) == true {
             layer.connection?.videoRotationAngle = angle
         }

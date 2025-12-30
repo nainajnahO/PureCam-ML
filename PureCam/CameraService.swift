@@ -1,3 +1,19 @@
+// PureCam - An iOS camera app with AI-powered exposure control
+// Copyright (C) 2025 nainajnahO
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import SwiftUI
 import AVFoundation
 import Observation
@@ -13,8 +29,16 @@ class CameraService: NSObject {
     private let output = AVCapturePhotoOutput()
     private var previewLayer: AVCaptureVideoPreviewLayer?
 
+    // Video output for live frame capture (for ML feature extraction)
+    private let videoDataOutput = AVCaptureVideoDataOutput()
+    private let videoOutputQueue = DispatchQueue(label: "com.purecam.videoOutputQueue")
+    private var latestPreviewFrame: CIImage?
+
     // Callback for preview captures - delivers decoded UIImage
     var onPreviewCaptured: ((UIImage) -> Void)?
+
+    // Callback for live frame capture (optional, for monitoring)
+    var onLiveFrameCaptured: ((CIImage) -> Void)?
     
     enum Status {
         case unconfigured
@@ -39,7 +63,22 @@ class CameraService: NSObject {
     var maxISO: Float = 0
     var minShutterSpeed: Double = 0
     var maxShutterSpeed: Double = 0
-    
+
+    // Discrete ISO values supported by iPhone cameras (1/3 stop increments)
+    static let supportedISOValues: [Float] = [
+        32, 40, 50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800,
+        1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400
+    ]
+
+    /// Rounds an arbitrary ISO value to the nearest supported discrete value
+    static func roundToNearestISO(_ value: Float) -> Float {
+        // Find the closest supported ISO value
+        guard let nearest = supportedISOValues.min(by: { abs($0 - value) < abs($1 - value) }) else {
+            return value
+        }
+        return nearest
+    }
+
     private func setupObservers() {
         // Observe device rotation to update capture orientation
         NotificationCenter.default.addObserver(self, selector: #selector(orientationChanged), name: UIDevice.orientationDidChangeNotification, object: nil)
@@ -47,18 +86,14 @@ class CameraService: NSObject {
     
     @objc func orientationChanged() {
         guard let connection = output.connection(with: .video) else { return }
-        
+
         let deviceOrientation = UIDevice.current.orientation
-        let angle: CGFloat
-        
-        switch deviceOrientation {
-        case .portrait: angle = 90
-        case .portraitUpsideDown: angle = 270
-        case .landscapeLeft: angle = 0      // Home button right
-        case .landscapeRight: angle = 180   // Home button left
-        default: return // Keep existing rotation
+
+        // Use OrientationMapper for consistent orientation handling
+        guard let angle = OrientationMapper.rotationAngle(for: deviceOrientation) else {
+            return // Keep existing rotation for unknown orientations
         }
-        
+
         if connection.isVideoRotationAngleSupported(angle) {
             connection.videoRotationAngle = angle
         }
@@ -101,7 +136,7 @@ class CameraService: NSObject {
             guard let self = self else { return }
             guard let input = self.session.inputs.first as? AVCaptureDeviceInput else { return }
             let device = input.device
-            
+
             do {
                 try device.lockForConfiguration()
                 if device.isExposureModeSupported(.continuousAutoExposure) {
@@ -113,7 +148,8 @@ class CameraService: NSObject {
             }
         }
     }
-    
+
+
     override init() {
         super.init()
         checkPermissions()
@@ -215,7 +251,7 @@ class CameraService: NSObject {
             
             if session.canAddOutput(output) {
                 session.addOutput(output)
-                
+
                 // Configure for high quality capture
                 if let maxDimensions = camera.activeFormat.supportedMaxPhotoDimensions.last {
                     output.maxPhotoDimensions = maxDimensions
@@ -223,7 +259,18 @@ class CameraService: NSObject {
             } else {
                 throw CameraError.cannotAddOutput
             }
-            
+
+            // Add video data output for live frame capture (ML feature extraction)
+            if session.canAddOutput(videoDataOutput) {
+                session.addOutput(videoDataOutput)
+                videoDataOutput.setSampleBufferDelegate(self, queue: videoOutputQueue)
+
+                // Configure for efficient preview extraction
+                videoDataOutput.videoSettings = [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                ]
+            }
+
             session.commitConfiguration()
             
             DispatchQueue.main.async {
@@ -268,12 +315,17 @@ class CameraService: NSObject {
 
         // Capture RAW only
         guard let rawFormat = output.availableRawPhotoPixelFormatTypes.first else {
-            print("⚠️ RAW format not available")
+            print("RAW format not available")
             return
         }
 
         let settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
         output.capturePhoto(with: settings, delegate: self)
+    }
+
+    /// Get the latest preview frame for ML feature extraction
+    func getCurrentPreviewFrame() -> CIImage? {
+        return latestPreviewFrame
     }
     
     private func savePhotoAsRAW(rawData: Data, photo: AVCapturePhoto) async {
@@ -291,9 +343,9 @@ class CameraService: NSObject {
                 PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: tempRAWURL)
             }
             try? FileManager.default.removeItem(at: tempRAWURL)
-            print("✅ Saved pure RAW (DNG)")
+            print("Saved pure RAW (DNG)")
         } catch {
-            print("❌ Failed to save RAW: \(error)")
+            print("Failed to save RAW: \(error)")
         }
     }
 }
@@ -307,7 +359,7 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
         switch currentCaptureMode {
         case .save:
             // Save pure RAW
-            print("📸 Saving pure RAW")
+            print("Saving pure RAW")
             guard let rawData = photo.fileDataRepresentation() else { return }
             Task { await savePhotoAsRAW(rawData: rawData, photo: photo) }
 
@@ -336,6 +388,25 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
 
         // Reset to save mode for next capture
         currentCaptureMode = .save
+    }
+}
+
+// MARK: - Video Data Output Delegate (for live frame capture)
+extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput,
+                      didOutput sampleBuffer: CMSampleBuffer,
+                      from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            return
+        }
+
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+
+        // Store for ML inference
+        latestPreviewFrame = ciImage
+
+        // Optionally notify callback (for monitoring)
+        onLiveFrameCaptured?(ciImage)
     }
 }
 
