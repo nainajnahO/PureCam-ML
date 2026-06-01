@@ -19,6 +19,7 @@ import AVFoundation
 import Observation
 import Photos
 import UniformTypeIdentifiers
+import OSLog
 
 @Observable
 class CameraService: NSObject {
@@ -32,13 +33,14 @@ class CameraService: NSObject {
     // Video output for live frame capture (for ML feature extraction)
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let videoOutputQueue = DispatchQueue(label: "com.purecam.videoOutputQueue")
-    private var latestPreviewFrame: CIImage?
+
+    // On-demand frame delivery: the video output does no per-frame work until
+    // something asks for a frame. Pending requests are fulfilled by the next
+    // delivered sample buffer. All access is serialized on `videoOutputQueue`.
+    private var pendingFrameRequests: [(id: UUID, continuation: CheckedContinuation<CIImage?, Never>)] = []
 
     // Callback for preview captures - delivers decoded UIImage
     var onPreviewCaptured: ((UIImage) -> Void)?
-
-    // Callback for live frame capture (optional, for monitoring)
-    var onLiveFrameCaptured: ((CIImage) -> Void)?
     
     enum Status {
         case unconfigured
@@ -126,7 +128,7 @@ class CameraService: NSObject {
                     self.currentShutterSpeed = newShutter
                 }
             } catch {
-                print("Failed to lock configuration for exposure: \(error)")
+                Logger.camera.error("Failed to lock configuration for exposure: \(error.localizedDescription)")
             }
         }
     }
@@ -144,7 +146,7 @@ class CameraService: NSObject {
                 }
                 device.unlockForConfiguration()
             } catch {
-                print("Failed to reset auto exposure: \(error)")
+                Logger.camera.error("Failed to reset auto exposure: \(error.localizedDescription)")
             }
         }
     }
@@ -265,6 +267,9 @@ class CameraService: NSObject {
                 session.addOutput(videoDataOutput)
                 videoDataOutput.setSampleBufferDelegate(self, queue: videoOutputQueue)
 
+                // Drop late frames rather than stalling the capture pipeline.
+                videoDataOutput.alwaysDiscardsLateVideoFrames = true
+
                 // Configure for efficient preview extraction
                 videoDataOutput.videoSettings = [
                     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
@@ -315,7 +320,7 @@ class CameraService: NSObject {
 
         // Capture RAW only
         guard let rawFormat = output.availableRawPhotoPixelFormatTypes.first else {
-            print("RAW format not available")
+            Logger.camera.error("RAW format not available")
             return
         }
 
@@ -323,9 +328,30 @@ class CameraService: NSObject {
         output.capturePhoto(with: settings, delegate: self)
     }
 
-    /// Get the latest preview frame for ML feature extraction
-    func getCurrentPreviewFrame() -> CIImage? {
-        return latestPreviewFrame
+    /// Request the next camera frame for ML feature extraction.
+    ///
+    /// The video data output stays attached but does no per-frame work until a
+    /// request is pending, at which point the next delivered sample buffer
+    /// fulfills it. Returns nil if no frame arrives within `timeout` seconds
+    /// (e.g. the session is not running).
+    func captureNextFrame(timeout: TimeInterval = 1.0) async -> CIImage? {
+        let id = UUID()
+        return await withCheckedContinuation { continuation in
+            videoOutputQueue.async { [weak self] in
+                self?.pendingFrameRequests.append((id, continuation))
+            }
+            // Timeout fallback so a request can never hang forever. Runs on the
+            // same serial queue as the delegate, so the continuation is resumed
+            // exactly once.
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+                self?.videoOutputQueue.async {
+                    guard let self,
+                          let index = self.pendingFrameRequests.firstIndex(where: { $0.id == id }) else { return }
+                    let request = self.pendingFrameRequests.remove(at: index)
+                    request.continuation.resume(returning: nil)
+                }
+            }
+        }
     }
     
     private func savePhotoAsRAW(rawData: Data, photo: AVCapturePhoto) async {
@@ -343,9 +369,9 @@ class CameraService: NSObject {
                 PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: tempRAWURL)
             }
             try? FileManager.default.removeItem(at: tempRAWURL)
-            print("Saved pure RAW (DNG)")
+            Logger.camera.debug("Saved pure RAW (DNG)")
         } catch {
-            print("Failed to save RAW: \(error)")
+            Logger.camera.error("Failed to save RAW: \(error.localizedDescription)")
         }
     }
 }
@@ -359,7 +385,7 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
         switch currentCaptureMode {
         case .save:
             // Save pure RAW
-            print("Saving pure RAW")
+            Logger.camera.debug("Saving pure RAW")
             guard let rawData = photo.fileDataRepresentation() else { return }
             Task { await savePhotoAsRAW(rawData: rawData, photo: photo) }
 
@@ -374,8 +400,7 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
                 // Apply orientation transform
                 let orientedImage = ciImage.oriented(forExifOrientation: Int32(photo.metadata[kCGImagePropertyOrientation as String] as? UInt32 ?? 6))
 
-                let context = CIContext(options: [.useSoftwareRenderer: false])
-                guard let cgImage = context.createCGImage(orientedImage, from: orientedImage.extent) else { return }
+                guard let cgImage = CIContext.shared.createCGImage(orientedImage, from: orientedImage.extent) else { return }
 
                 let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
 
@@ -396,17 +421,22 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput,
                       didOutput sampleBuffer: CMSampleBuffer,
                       from connection: AVCaptureConnection) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            return
-        }
+        // No work unless something is waiting for a frame. This keeps the ML
+        // pipeline idle (no per-frame CIImage allocation) until inference or
+        // training actually needs the current scene.
+        guard !pendingFrameRequests.isEmpty else { return }
 
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // CIImage retains the pixel buffer, so it stays valid for the awaiting
+        // caller to render even after this callback returns.
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
 
-        // Store for ML inference
-        latestPreviewFrame = ciImage
-
-        // Optionally notify callback (for monitoring)
-        onLiveFrameCaptured?(ciImage)
+        let requests = pendingFrameRequests
+        pendingFrameRequests.removeAll()
+        for request in requests {
+            request.continuation.resume(returning: ciImage)
+        }
     }
 }
 

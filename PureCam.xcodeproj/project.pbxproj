@@ -10,28 +10,12 @@
 		3C484C1E2F04863C0040EB3F /* TestPlan.xctestplan in Resources */ = {isa = PBXBuildFile; fileRef = 3C484C1D2F04863C0040EB3F /* TestPlan.xctestplan */; };
 /* End PBXBuildFile section */
 
-/* Begin PBXContainerItemProxy section */
-		3C484C272F0486700040EB3F /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 3CE474362EFE25840097E20A /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 3CE4743D2EFE25840097E20A;
-			remoteInfo = PureCam;
-		};
-/* End PBXContainerItemProxy section */
-
 /* Begin PBXFileReference section */
 		3C484C1D2F04863C0040EB3F /* TestPlan.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = TestPlan.xctestplan; sourceTree = "<group>"; };
-		3C484C232F0486700040EB3F /* PureCamTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PureCamTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3CE4743E2EFE25840097E20A /* PureCam.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PureCam.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		3C484C242F0486700040EB3F /* PureCamTests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = PureCamTests;
-			sourceTree = "<group>";
-		};
 		3CE474402EFE25840097E20A /* PureCam */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = PureCam;
@@ -40,13 +24,6 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		3C484C202F0486700040EB3F /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		3CE4743B2EFE25840097E20A /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -62,7 +39,6 @@
 			children = (
 				3C484C1D2F04863C0040EB3F /* TestPlan.xctestplan */,
 				3CE474402EFE25840097E20A /* PureCam */,
-				3C484C242F0486700040EB3F /* PureCamTests */,
 				3CE4743F2EFE25840097E20A /* Products */,
 			);
 			sourceTree = "<group>";
@@ -71,7 +47,6 @@
 			isa = PBXGroup;
 			children = (
 				3CE4743E2EFE25840097E20A /* PureCam.app */,
-				3C484C232F0486700040EB3F /* PureCamTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -79,29 +54,6 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		3C484C222F0486700040EB3F /* PureCamTests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 3C484C292F0486700040EB3F /* Build configuration list for PBXNativeTarget "PureCamTests" */;
-			buildPhases = (
-				3C484C1F2F0486700040EB3F /* Sources */,
-				3C484C202F0486700040EB3F /* Frameworks */,
-				3C484C212F0486700040EB3F /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				3C484C282F0486700040EB3F /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				3C484C242F0486700040EB3F /* PureCamTests */,
-			);
-			name = PureCamTests;
-			packageProductDependencies = (
-			);
-			productName = PureCamTests;
-			productReference = 3C484C232F0486700040EB3F /* PureCamTests.xctest */;
-			productType = "com.apple.product-type.bundle.unit-test";
-		};
 		3CE4743D2EFE25840097E20A /* PureCam */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 3CE474492EFE25850097E20A /* Build configuration list for PBXNativeTarget "PureCam" */;
@@ -134,10 +86,6 @@
 				LastSwiftUpdateCheck = 2620;
 				LastUpgradeCheck = 2620;
 				TargetAttributes = {
-					3C484C222F0486700040EB3F = {
-						CreatedOnToolsVersion = 26.2;
-						TestTargetID = 3CE4743D2EFE25840097E20A;
-					};
 					3CE4743D2EFE25840097E20A = {
 						CreatedOnToolsVersion = 26.2;
 						LastSwiftMigration = 2620;
@@ -159,19 +107,11 @@
 			projectRoot = "";
 			targets = (
 				3CE4743D2EFE25840097E20A /* PureCam */,
-				3C484C222F0486700040EB3F /* PureCamTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		3C484C212F0486700040EB3F /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		3CE4743C2EFE25840097E20A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -183,13 +123,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		3C484C1F2F0486700040EB3F /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		3CE4743A2EFE25840097E20A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -199,67 +132,7 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
-/* Begin PBXTargetDependency section */
-		3C484C282F0486700040EB3F /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 3CE4743D2EFE25840097E20A /* PureCam */;
-			targetProxy = 3C484C272F0486700040EB3F /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
-
 /* Begin XCBuildConfiguration section */
-		3C484C2A2F0486700040EB3F /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = BU842SAMK8;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
-				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = nainajnahO.PureCamTests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				STRING_CATALOG_GENERATE_SYMBOLS = NO;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PureCam.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/PureCam";
-				XROS_DEPLOYMENT_TARGET = 26.2;
-			};
-			name = Debug;
-		};
-		3C484C2B2F0486700040EB3F /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = BU842SAMK8;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
-				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = nainajnahO.PureCamTests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				STRING_CATALOG_GENERATE_SYMBOLS = NO;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PureCam.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/PureCam";
-				XROS_DEPLOYMENT_TARGET = 26.2;
-			};
-			name = Release;
-		};
 		3CE474472EFE25850097E20A /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -384,9 +257,11 @@
 		3CE4744A2EFE25850097E20A /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = PureIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = BU842SAMK8;
@@ -404,8 +279,16 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					CreateML,
+					"-framework",
+					TabularData,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = nainajnahO.PureCam;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -420,9 +303,11 @@
 		3CE4744B2EFE25850097E20A /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = PureIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = BU842SAMK8;
@@ -442,6 +327,7 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = nainajnahO.PureCam;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -455,15 +341,6 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		3C484C292F0486700040EB3F /* Build configuration list for PBXNativeTarget "PureCamTests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				3C484C2A2F0486700040EB3F /* Debug */,
-				3C484C2B2F0486700040EB3F /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
 		3CE474392EFE25840097E20A /* Build configuration list for PBXProject "PureCam" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

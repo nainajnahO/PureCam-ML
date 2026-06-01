@@ -14,30 +14,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import OSLog
 
-import SwiftUI
+/// Shared os.Logger categories for PureCam.
+/// Using the unified logging system instead of print() so messages are
+/// structured, can be filtered by category in Console.app, and are stripped
+/// from release builds at the appropriate log level.
+extension Logger {
+    private static let subsystem = "com.purecam"
 
-// FORCE APP TO RUN IN PORTRAIT
-class AppDelegate: NSObject, UIApplicationDelegate {
-    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
-        return .portrait
-    }
-}
+    /// Camera session, capture, and exposure plumbing.
+    static let camera = Logger(subsystem: subsystem, category: "camera")
 
-@main
-struct PureCamApp: App {
-
-    // APPLY PORTRAIT MODE
-    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
-    var body: some Scene {
-        WindowGroup {
-
-            // LOAD CONTENT VIEW
-            ContentView()
-
-                // SET APP-WIDE ACCENT COLOUR
-                .tint(.yellow)
-        }
-    }
+    /// Machine-learning inference, training, and feature extraction.
+    static let ml = Logger(subsystem: subsystem, category: "ml")
 }

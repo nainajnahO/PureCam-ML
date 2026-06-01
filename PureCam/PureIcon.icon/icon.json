@@ -1,0 +1,99 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "fill-specializations" : [
+    {
+      "value" : "automatic"
+    },
+    {
+      "appearance" : "dark",
+      "value" : "automatic"
+    }
+  ],
+  "groups" : [
+    {
+      "blur-material" : null,
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill" : "automatic",
+          "glass-specializations" : [
+            {
+              "value" : true
+            },
+            {
+              "idiom" : "square",
+              "value" : true
+            }
+          ],
+          "hidden" : false,
+          "image-name" : "yellow_circle.svg",
+          "name" : "yellow_circle",
+          "position" : {
+            "scale" : 2.7,
+            "translation-in-points" : [
+              -1015.952081857838,
+              -1024.6331569602723
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
+          "glass-specializations" : [
+            {
+              "value" : true
+            },
+            {
+              "idiom" : "square",
+              "value" : true
+            }
+          ],
+          "hidden" : false,
+          "image-name" : "yellow_circle.svg",
+          "name" : "yellow_circle",
+          "position" : {
+            "scale" : 2.85,
+            "translation-in-points" : [
+              -909.2456158113274,
+              -917.3478397246931
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:0.66422,0.66424,0.66423,1.00000"
+          },
+          "glass" : true,
+          "image-name" : "white_circle.svg",
+          "name" : "white_circle",
+          "position" : {
+            "scale" : 11,
+            "translation-in-points" : [
+              -3.410605131648481e-13,
+              3393.2457433813397
+            ]
+          }
+        }
+      ],
+      "lighting" : "individual",
+      "name" : "Group",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

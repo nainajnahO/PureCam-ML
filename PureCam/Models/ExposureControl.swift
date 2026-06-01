@@ -14,30 +14,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-
-import SwiftUI
-
-// FORCE APP TO RUN IN PORTRAIT
-class AppDelegate: NSObject, UIApplicationDelegate {
-    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
-        return .portrait
-    }
-}
-
-@main
-struct PureCamApp: App {
-
-    // APPLY PORTRAIT MODE
-    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
-    var body: some Scene {
-        WindowGroup {
-
-            // LOAD CONTENT VIEW
-            ContentView()
-
-                // SET APP-WIDE ACCENT COLOUR
-                .tint(.yellow)
-        }
-    }
+/// Represents which exposure control is active during manual adjustment
+enum ExposureControl {
+    case iso      // Inner dot - ISO control
+    case shutter  // Outer dot - Shutter speed control
 }

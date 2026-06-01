@@ -2,10 +2,24 @@
 
 **An intelligent iOS camera app that learns your photography style**
 
-![iOS](https://img.shields.io/badge/iOS-15.0+-blue)
-![Swift](https://img.shields.io/badge/Swift-5.9-orange)
-![SwiftUI](https://img.shields.io/badge/SwiftUI-4.0-green)
+![iOS](https://img.shields.io/badge/iOS-26.0+-blue)
+![Swift](https://img.shields.io/badge/Swift-5.9+-orange)
+![SwiftUI](https://img.shields.io/badge/SwiftUI-6.0-green)
 ![ML](https://img.shields.io/badge/CoreML-On--Device-purple)
+
+
+## Preview
+
+<table>
+  <tr>
+    <td><img src="PureCam/media/B.jpeg" /></td>
+    <td rowspan="2"><img src="PureCam/media/D.jpeg" /></td>
+  </tr>
+  <tr>
+    <td><img src="PureCam/media/A.jpeg" /></td>
+  </tr>
+</table>
+ 
 
 ---
 
@@ -117,8 +131,6 @@ The app processes high-resolution camera frames in real-time while:
 
 ---
 
-## Skills Demonstrated
-
 | Skill | How This Project Shows It |
 |-------|---------------------------|
 | **iOS Development** | Native app using latest SwiftUI and iOS 15+ APIs |
@@ -140,16 +152,6 @@ As a photographer and developer, I was frustrated with:
 3. **Privacy concerns** with cloud-based AI assistants
 
 PureCam combines my passions for photography and machine learning to create a tool that's both powerful and respectful of the user.
-
----
-
-## Future Enhancements
-
-- [ ] Histogram-based features (15 additional bins for finer tonal analysis)
-- [ ] Scene classification (portrait, landscape, night, etc.)
-- [ ] Multi-model ensemble for improved accuracy
-- [ ] Export/import custom models (share your style with others)
-- [ ] Analytics dashboard (show training progress and model performance)
 
 ---
 

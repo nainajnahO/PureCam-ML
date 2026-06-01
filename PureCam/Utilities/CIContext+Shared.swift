@@ -14,30 +14,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import CoreImage
 
-import SwiftUI
-
-// FORCE APP TO RUN IN PORTRAIT
-class AppDelegate: NSObject, UIApplicationDelegate {
-    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
-        return .portrait
-    }
-}
-
-@main
-struct PureCamApp: App {
-
-    // APPLY PORTRAIT MODE
-    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
-    var body: some Scene {
-        WindowGroup {
-
-            // LOAD CONTENT VIEW
-            ContentView()
-
-                // SET APP-WIDE ACCENT COLOUR
-                .tint(.yellow)
-        }
-    }
+extension CIContext {
+    /// Single shared, GPU-backed CIContext for the whole app.
+    ///
+    /// A CIContext is expensive to create and is designed to be reused, so we
+    /// build one here and share it across the preview pipeline and the ML
+    /// feature extractor instead of allocating a new context per call.
+    static let shared = CIContext(options: [.useSoftwareRenderer: false])
 }

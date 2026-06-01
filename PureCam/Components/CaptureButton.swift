@@ -17,16 +17,10 @@
 import SwiftUI
 
 struct CaptureButton: View {
-    @Binding var cameraService: CameraService
-    @Binding var hapticManager: HapticManager
-    @Binding var autoExposureManager: AutoExposureManager?
-    @Binding var isoRotationAngle: Angle
-    @Binding var shutterRotationAngle: Angle
-    @Binding var lastDiscreteISO: Float
-    @Binding var activeControl: ExposureControl?
-    @Binding var lastDragTime: Date
-    @Binding var lastDragAngle: Double
-    @Binding var isAIAnimating: Bool
+    // `@Observable` references — read directly, no Bindings required.
+    let exposureVM: ExposureControlViewModel
+    let cameraService: CameraService
+    let autoExposure: AutoExposureCoordinator
 
     let buttonSize: CGFloat
     let dotSize: CGFloat
@@ -37,6 +31,12 @@ struct CaptureButton: View {
     var onCapture: () -> Void
 
     var body: some View {
+        let isAIAnimating = autoExposure.isAIAnimating
+
+        // Control dots only. The Liquid Glass surface is a separate layer below
+        // (see ButtonUILayer) so these dots render on top of the glass — the
+        // orbiting dots sit at a larger radius than the glass disc, so they
+        // can't be glass "content" and must be their own overlay layer.
         ZStack {
             // Outer dot (shutter control) with HDR glow
             Circle()
@@ -45,7 +45,7 @@ struct CaptureButton: View {
                 .shadow(color: .yellow.opacity(isAIAnimating ? 0.9 : 0), radius: isAIAnimating ? 15 : 0)
                 .shadow(color: .yellow.opacity(isAIAnimating ? 0.7 : 0), radius: isAIAnimating ? 30 : 0)
                 .offset(y: -shutterRingRadius)
-                .rotationEffect(shutterRotationAngle)
+                .rotationEffect(exposureVM.shutterRotationAngle)
                 .opacity(isAIAnimating ? 1.0 : 0.8)
                 .brightness(isAIAnimating ? 0.4 : 0)
                 .allowsHitTesting(false)
@@ -57,7 +57,7 @@ struct CaptureButton: View {
                 .shadow(color: .white.opacity(isAIAnimating ? 0.9 : 0), radius: isAIAnimating ? 15 : 0)
                 .shadow(color: .white.opacity(isAIAnimating ? 0.7 : 0), radius: isAIAnimating ? 30 : 0)
                 .offset(y: -isoRingRadius)
-                .rotationEffect(isoRotationAngle)
+                .rotationEffect(exposureVM.isoRotationAngle)
                 .opacity(isAIAnimating ? 1.0 : 0.8)
                 .brightness(isAIAnimating ? 0.4 : 0)
                 .allowsHitTesting(false)
@@ -82,7 +82,7 @@ struct CaptureButton: View {
 
     private func handleDragChange(_ value: DragGesture.Value) {
         // Notify AI manager of manual override (disables AI for session)
-        autoExposureManager?.notifyManualOverride()
+        exposureVM.notifyAutoExposureManager(autoExposure.autoExposureManager)
 
         let buttonCenter = buttonSize / 2
 
@@ -95,8 +95,8 @@ struct CaptureButton: View {
         // Detect zone
         let control: ExposureControl = distance < isoZoneRadius ? .iso : .shutter
 
-        if activeControl == nil {
-            activeControl = control
+        if exposureVM.activeControl == nil {
+            exposureVM.setActiveControl(control)
         }
 
         // Calculate rotation angle
@@ -106,99 +106,25 @@ struct CaptureButton: View {
         let normalizedAngle = (angleDegrees + 90 + 360).truncatingRemainder(dividingBy: 360)
         let progress = normalizedAngle / 360.0
 
-        switch activeControl {
+        // Update rotation angle in ViewModel
+        if let activeControl = exposureVM.activeControl {
+            exposureVM.updateRotationAngle(control: activeControl, angle: rotationAngle)
+        }
+
+        switch exposureVM.activeControl {
         case .iso:
-            updateISO(rotationAngle: rotationAngle, progress: progress)
+            exposureVM.updateISO(progress: progress)
 
         case .shutter:
-            updateShutter(rotationAngle: rotationAngle, normalizedAngle: normalizedAngle, progress: progress)
+            exposureVM.updateShutter(progress: progress, normalizedAngle: normalizedAngle)
 
         case .none:
             break
         }
     }
 
-    private func updateISO(rotationAngle: Angle, progress: Double) {
-        isoRotationAngle = rotationAngle
-
-        // Map to ISO logarithmically using ExposureCalculator
-        let continuousISO = ExposureCalculator.isoFromProgress(
-            progress,
-            min: cameraService.minISO,
-            max: cameraService.maxISO
-        )
-
-        // Round to nearest discrete ISO value
-        let newISO = CameraService.roundToNearestISO(continuousISO)
-
-        // Trigger haptic when discrete ISO value changes
-        if newISO != lastDiscreteISO {
-            lastDiscreteISO = newISO
-            hapticManager.playISOClick()
-        }
-
-        // Apply new ISO (shutter stays fixed)
-        cameraService.setCustomExposure(
-            iso: newISO,
-            shutterSeconds: cameraService.currentShutterSpeed
-        )
-    }
-
-    private func updateShutter(rotationAngle: Angle, normalizedAngle: Double, progress: Double) {
-        shutterRotationAngle = rotationAngle
-
-        // Start rumble on first drag
-        if lastDragTime == .distantPast {
-            hapticManager.startShutterRumble()
-            lastDragTime = Date()
-            lastDragAngle = normalizedAngle
-        } else {
-            // Calculate velocity
-            let now = Date()
-            let timeDelta = now.timeIntervalSince(lastDragTime)
-
-            // Handle angle wraparound
-            var angleDelta = normalizedAngle - lastDragAngle
-            if angleDelta > 180 {
-                angleDelta -= 360
-            } else if angleDelta < -180 {
-                angleDelta += 360
-            }
-
-            // Calculate velocity and normalize to 0-1 range
-            let velocity = timeDelta > 0 ? abs(angleDelta / timeDelta) : 0
-            let normalizedVelocity = min(velocity / 500.0, 1.0)
-
-            // Update rumble intensity
-            hapticManager.updateShutterRumble(velocity: normalizedVelocity)
-
-            // Update tracking variables
-            lastDragTime = now
-            lastDragAngle = normalizedAngle
-        }
-
-        // Map to shutter speed logarithmically using ExposureCalculator
-        let newShutter = ExposureCalculator.shutterFromProgress(
-            progress,
-            min: cameraService.minShutterSpeed,
-            max: cameraService.maxShutterSpeed
-        )
-
-        // Apply new shutter (ISO stays fixed)
-        cameraService.setCustomExposure(
-            iso: cameraService.currentISO,
-            shutterSeconds: newShutter
-        )
-    }
-
     private func handleDragEnd() {
-        // Stop rumble if we were adjusting shutter
-        if activeControl == .shutter {
-            hapticManager.stopShutterRumble()
-            lastDragTime = .distantPast
-            lastDragAngle = 0.0
-        }
-
-        activeControl = nil
+        // Delegate to ViewModel
+        exposureVM.resetActiveControl()
     }
 }

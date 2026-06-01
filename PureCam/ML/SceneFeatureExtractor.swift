@@ -18,13 +18,15 @@ import CoreImage
 import CoreVideo
 import Accelerate
 import UIKit
+import OSLog
 
 /// Extracts scene features from camera preview for ML inference
 /// Optimized for performance on modern devices
 class SceneFeatureExtractor {
     // MARK: - Properties
 
-    private let context = CIContext(options: [.useSoftwareRenderer: false])
+    /// Shared, GPU-backed context (creating a CIContext per extractor is costly).
+    private let context = CIContext.shared
 
     // Optimization: Downsample to 256x256 for analysis (reduces 12MP to 65K pixels)
     private let targetSize = CGSize(width: 256, height: 256)
@@ -42,7 +44,7 @@ class SceneFeatureExtractor {
 
         // 2. Convert to luminance buffer
         guard let luminanceBuffer = extractLuminance(from: downsampled) else {
-            print("Failed to extract luminance")
+            Logger.ml.error("Failed to extract luminance")
             return nil
         }
 
@@ -76,7 +78,7 @@ class SceneFeatureExtractor {
         )
 
         let elapsed = Date().timeIntervalSince(startTime) * 1000
-        print("Feature extraction: \(String(format: "%.1f", elapsed))ms")
+        Logger.ml.debug("Feature extraction: \(String(format: "%.1f", elapsed))ms")
 
         return features
     }

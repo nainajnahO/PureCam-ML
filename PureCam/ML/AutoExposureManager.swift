@@ -179,6 +179,82 @@ class AutoExposureManager {
         }
     }
 
+    /// Run ML inference manually (triggered by user action like long press)
+    /// Unlike runStartupInference, this can be called multiple times
+    /// - Parameter previewImage: Live camera preview (CIImage from video buffer)
+    /// - Returns: (iso, shutterSeconds) if successful, nil otherwise
+    func runManualInference(from previewImage: CIImage) -> (iso: Float, shutterSeconds: Double)? {
+        guard let isoModel = isoModel,
+              let shutterModel = shutterModel else {
+            print("Models not available for manual inference (state: \(state))")
+            return nil
+        }
+
+        // Allow manual inference unless disabled or already inferring
+        switch state {
+        case .disabled:
+            print("Cannot run inference - no models trained yet")
+            return nil
+        case .error(let message):
+            print("Cannot run inference - error state: \(message)")
+            return nil
+        case .inferring:
+            print("Inference already in progress")
+            return nil
+        default:
+            break // .ready, .applied, .manualOverride are all valid
+        }
+
+        state = .inferring
+        let startTime = Date()
+
+        // 1. Extract features
+        guard let features = featureExtractor.extract(from: previewImage) else {
+            state = .error("Feature extraction failed")
+            return nil
+        }
+
+        // 2. SEQUENTIAL PREDICTION (same as startup inference)
+        do {
+            let sceneFeatures = try features.toMLFeatureProvider()
+
+            // Step 1: Predict ISO from scene features
+            let isoPrediction = try isoModel.prediction(from: sceneFeatures)
+            guard let predictedISO = isoPrediction.featureValue(for: "targetISO")?.doubleValue else {
+                state = .error("Invalid ISO prediction output")
+                return nil
+            }
+
+            // Step 2: Predict shutter from scene features + predicted ISO
+            var shutterFeaturesDict = sceneFeatures.featureNames.reduce(into: [String: Any]()) { dict, name in
+                dict[name] = sceneFeatures.featureValue(for: name)?.doubleValue ?? 0.0
+            }
+            shutterFeaturesDict["chosenISO"] = predictedISO
+
+            let shutterFeatures = try MLDictionaryFeatureProvider(dictionary: shutterFeaturesDict)
+            let shutterPrediction = try shutterModel.prediction(from: shutterFeatures)
+
+            guard let predictedShutter = shutterPrediction.featureValue(for: "targetShutterSeconds")?.doubleValue else {
+                state = .error("Invalid shutter prediction output")
+                return nil
+            }
+
+            let elapsed = Date().timeIntervalSince(startTime) * 1000
+            print("Manual ML inference completed in \(String(format: "%.1f", elapsed))ms")
+            print("     ISO: \(Int(predictedISO))")
+            print("     Shutter: 1/\(Int(1.0/predictedShutter))")
+
+            state = .applied
+
+            return (iso: Float(predictedISO), shutterSeconds: predictedShutter)
+
+        } catch {
+            state = .error("Inference failed: \(error.localizedDescription)")
+            print("Manual inference error: \(error)")
+            return nil
+        }
+    }
+
     // MARK: - Manual Override
 
     /// Called when user drags knob - disables AI for current session

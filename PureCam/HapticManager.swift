@@ -1,3 +1,19 @@
+// PureCam - An iOS camera app with AI-powered exposure control
+// Copyright (C) 2025 nainajnahO
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import CoreHaptics
 import Foundation
 
@@ -17,7 +33,7 @@ class HapticManager {
 
     private func prepareHaptics() {
         guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else {
-            print("⚠️ Device doesn't support haptics")
+            print("Device doesn't support haptics")
             return
         }
 
@@ -27,22 +43,22 @@ class HapticManager {
 
             // Handle engine stopped
             engine?.stoppedHandler = { [weak self] reason in
-                print("⚠️ Haptic engine stopped: \(reason.rawValue)")
+                print("Haptic engine stopped: \(reason.rawValue)")
                 self?.isRumbling = false
             }
 
             // Handle engine reset
             engine?.resetHandler = { [weak self] in
-                print("🔄 Haptic engine reset")
+                print("Haptic engine reset")
                 do {
                     try self?.engine?.start()
                 } catch {
-                    print("❌ Failed to restart haptic engine: \(error)")
+                    print("Failed to restart haptic engine: \(error)")
                 }
             }
 
         } catch {
-            print("❌ Failed to create haptic engine: \(error)")
+            print("Failed to create haptic engine: \(error)")
         }
     }
 
