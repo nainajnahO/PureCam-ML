@@ -2,6 +2,7 @@
 
 **An intelligent iOS camera app that learns your photography style**
 
+[![CI](https://github.com/nainajnahO/PureCam-ML/actions/workflows/ci.yml/badge.svg)](https://github.com/nainajnahO/PureCam-ML/actions/workflows/ci.yml)
 ![iOS](https://img.shields.io/badge/iOS-26.0+-blue)
 ![Swift](https://img.shields.io/badge/Swift-5.9+-orange)
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-6.0-green)

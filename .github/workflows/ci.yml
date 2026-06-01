@@ -1,0 +1,41 @@
+name: CI
+
+# Build-check on every push to main and on pull requests targeting main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Only keep the newest build per branch; cancel any in-progress older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (iOS device, unsigned)
+    # macOS 26 is the only image that ships Xcode 26 (required for the
+    # iOS 26.2 deployment target / Liquid Glass APIs).
+    runs-on: macos-26
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Show the active Xcode version
+        run: xcodebuild -version
+
+      # Build for a *generic iOS device*, not a simulator: the app imports
+      # CreateML, which only exists in the device SDK. Code signing is off
+      # because cloud runners have no signing certificates — we only need to
+      # confirm the project compiles, not produce an installable build.
+      - name: Build PureCam
+        run: |
+          xcodebuild build \
+            -project PureCam.xcodeproj \
+            -scheme PureCam \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
