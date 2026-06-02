@@ -16,28 +16,10 @@
 
 import UIKit
 
-/// Utility for mapping device/interface orientation to camera rotation angles
-/// Consolidates orientation handling across the app
+/// Utility for mapping interface orientation to camera rotation angles.
+/// Used by CameraPreview for the preview layer. Capture orientation is handled
+/// separately by AVCaptureDevice.RotationCoordinator in CameraService.
 enum OrientationMapper {
-    /// Map UIDeviceOrientation to camera rotation angle
-    /// Used by CameraService for video output rotation
-    /// - Parameter orientation: The device's physical orientation
-    /// - Returns: Rotation angle in degrees, or nil if orientation should not trigger a change
-    static func rotationAngle(for orientation: UIDeviceOrientation) -> CGFloat? {
-        switch orientation {
-        case .portrait:
-            return 90
-        case .portraitUpsideDown:
-            return 270
-        case .landscapeLeft:      // Device tilted left → home button on RIGHT
-            return 0
-        case .landscapeRight:     // Device tilted right → home button on LEFT
-            return 180
-        default:
-            return nil  // Keep existing rotation for unknown/flat/faceUp/faceDown
-        }
-    }
-
     /// Map UIInterfaceOrientation to camera rotation angle
     /// Used by CameraPreview for preview layer rotation
     /// - Parameter orientation: The interface orientation from window scene

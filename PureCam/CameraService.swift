@@ -30,6 +30,13 @@ class CameraService: NSObject {
     private let output = AVCapturePhotoOutput()
     private var previewLayer: AVCaptureVideoPreviewLayer?
 
+    // Tracks the device's physical orientation relative to gravity and supplies
+    // the rotation angle to apply at capture time. This is Apple's replacement
+    // (iOS 17+) for hand-mapping UIDeviceOrientation to angles, and it stays
+    // correct regardless of the portrait-locked UI or the Control Center
+    // rotation lock. Must be retained for the lifetime of the session.
+    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+
     // Video output for live frame capture (for ML feature extraction)
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let videoOutputQueue = DispatchQueue(label: "com.purecam.videoOutputQueue")
@@ -81,26 +88,6 @@ class CameraService: NSObject {
         return nearest
     }
 
-    private func setupObservers() {
-        // Observe device rotation to update capture orientation
-        NotificationCenter.default.addObserver(self, selector: #selector(orientationChanged), name: UIDevice.orientationDidChangeNotification, object: nil)
-    }
-    
-    @objc func orientationChanged() {
-        guard let connection = output.connection(with: .video) else { return }
-
-        let deviceOrientation = UIDevice.current.orientation
-
-        // Use OrientationMapper for consistent orientation handling
-        guard let angle = OrientationMapper.rotationAngle(for: deviceOrientation) else {
-            return // Keep existing rotation for unknown orientations
-        }
-
-        if connection.isVideoRotationAngleSupported(angle) {
-            connection.videoRotationAngle = angle
-        }
-    }
-    
     // Manual Exposure Controls
     func setCustomExposure(iso: Float, shutterSeconds: Double) {
         sessionQueue.async { [weak self] in
@@ -155,22 +142,14 @@ class CameraService: NSObject {
     override init() {
         super.init()
         checkPermissions()
-        setupObservers()
-        
-        // Enable device orientation notifications
-        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-        
+
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             self.configureSession()
             self.startSession()
         }
     }
-    
-    deinit {
-        UIDevice.current.endGeneratingDeviceOrientationNotifications()
-    }
-    
+
     private func checkPermissions() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -244,12 +223,17 @@ class CameraService: NSObject {
             self.currentShutterSpeed = camera.exposureDuration.seconds
             
             let input = try AVCaptureDeviceInput(device: camera)
-            
+
             if session.canAddInput(input) {
                 session.addInput(input)
             } else {
                 throw CameraError.cannotAddInput
             }
+
+            // Start tracking physical orientation for this device. previewLayer is
+            // nil because the preview stays portrait (the app is portrait-locked);
+            // we only need the capture angle.
+            rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: nil)
             
             if session.canAddOutput(output) {
                 session.addOutput(output)
@@ -322,6 +306,16 @@ class CameraService: NSObject {
         guard let rawFormat = output.availableRawPhotoPixelFormatTypes.first else {
             Logger.camera.error("RAW format not available")
             return
+        }
+
+        // Orient the capture to gravity at the instant of capture. Reading the
+        // angle here (rather than on a rotation notification) avoids stale or
+        // missing orientation values. For RAW this is recorded in the DNG
+        // orientation tag — the pixels themselves are never rotated.
+        if let connection = output.connection(with: .video),
+           let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture,
+           connection.isVideoRotationAngleSupported(angle) {
+            connection.videoRotationAngle = angle
         }
 
         let settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
