@@ -18,7 +18,6 @@ import SwiftUI
 import AVFoundation
 import Observation
 import Photos
-import UniformTypeIdentifiers
 import OSLog
 
 @Observable
@@ -28,7 +27,6 @@ class CameraService: NSObject {
 
     private let sessionQueue = DispatchQueue(label: "com.purecam.sessionQueue")
     private let output = AVCapturePhotoOutput()
-    private var previewLayer: AVCaptureVideoPreviewLayer?
 
     // Tracks the device's physical orientation relative to gravity and supplies
     // the rotation angle to apply at capture time. This is Apple's replacement
@@ -348,7 +346,7 @@ class CameraService: NSObject {
         }
     }
     
-    private func savePhotoAsRAW(rawData: Data, photo: AVCapturePhoto) async {
+    private func savePhotoAsRAW(rawData: Data) async {
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else { return }
 
@@ -381,7 +379,7 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
             // Save pure RAW
             Logger.camera.debug("Saving pure RAW")
             guard let rawData = photo.fileDataRepresentation() else { return }
-            Task { await savePhotoAsRAW(rawData: rawData, photo: photo) }
+            Task { await savePhotoAsRAW(rawData: rawData) }
 
         case .preview:
             // Preview RAW (no save)
