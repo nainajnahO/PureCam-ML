@@ -33,8 +33,7 @@ struct ContentView: View {
             CameraFeedView(
                 cameraService: scene.cameraService,
                 showRAWPreview: scene.cameraVM.showRAWPreview,
-                rawPreviewImage: scene.cameraVM.rawPreviewImage,
-                deviceOrientation: scene.cameraVM.deviceOrientation
+                rawPreviewImage: scene.cameraVM.rawPreviewImage
             )
 
             // LAYER 2: Button UI (foreground)

@@ -46,11 +46,10 @@ struct CameraPreview: UIViewRepresentable {
     }
     
     private func updateRotation(for layer: AVCaptureVideoPreviewLayer) {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
-        let orientation = windowScene.effectiveGeometry.interfaceOrientation
-
-        // Use OrientationMapper for consistent orientation handling
-        let angle = OrientationMapper.rotationAngle(for: orientation)
+        // The app is locked to portrait (see AppDelegate), so the preview is
+        // always portrait — 90°. Capture orientation is handled separately by
+        // AVCaptureDevice.RotationCoordinator in CameraService.
+        let angle: CGFloat = 90
 
         if layer.connection?.isVideoRotationAngleSupported(angle) == true {
             layer.connection?.videoRotationAngle = angle

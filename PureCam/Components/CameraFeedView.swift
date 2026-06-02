@@ -20,7 +20,6 @@ struct CameraFeedView: View {
     let cameraService: CameraService
     let showRAWPreview: Bool
     let rawPreviewImage: UIImage?
-    let deviceOrientation: UIDeviceOrientation
 
     var body: some View {
         if cameraService.status == .configured {
@@ -31,17 +30,13 @@ struct CameraFeedView: View {
                         .opacity(showRAWPreview ? 0 : 1)
 
                     if showRAWPreview, let previewImage = rawPreviewImage {
-                        let rotation = rotationAngle(for: deviceOrientation)
-                        let isLandscape = abs(rotation.degrees) == 90
-
+                        // CameraService applies the same fixed orientation the live
+                        // preview uses, so the snapshot is shown as-is — no rotation.
+                        // This matches the live preview in every device orientation
+                        // and works with rotation lock on.
                         Image(uiImage: previewImage)
                             .resizable()
                             .scaledToFill()
-                            .frame(
-                                width: isLandscape ? geometry.size.height : geometry.size.width,
-                                height: isLandscape ? geometry.size.width : geometry.size.height
-                            )
-                            .rotationEffect(rotation)
                             .frame(width: geometry.size.width, height: geometry.size.height)
                             .clipped()
                             .transition(.opacity)
@@ -61,22 +56,6 @@ struct CameraFeedView: View {
                 systemImage: "exclamationmark.triangle.fill",
                 description: Text("The camera could not be started.")
             )
-        }
-    }
-
-    /// Calculate rotation angle for RAW preview based on device orientation
-    private func rotationAngle(for orientation: UIDeviceOrientation) -> Angle {
-        switch orientation {
-        case .portrait:
-            return .degrees(0)
-        case .portraitUpsideDown:
-            return .degrees(180)
-        case .landscapeLeft:
-            return .degrees(90)
-        case .landscapeRight:
-            return .degrees(-90)
-        default:
-            return .degrees(0)
         }
     }
 }
