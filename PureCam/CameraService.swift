@@ -390,13 +390,13 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
                       let ciImage = CIImage(data: data) else { return }
 
                 // Apply the SAME fixed orientation the live preview layer uses
-                // (videoRotationAngle = 90°, i.e. EXIF orientation 6). A fixed
-                // transform shows upright in every device orientation — the device
-                // tilt and the portrait-locked screen cancel out — so it needs no
-                // UIDevice orientation and keeps working with rotation lock on,
-                // exactly like the live preview. The snapshot then matches the
-                // preview by construction.
-                let orientedImage = ciImage.oriented(forExifOrientation: 6)
+                // (videoRotationAngle = 90°, i.e. .right / EXIF orientation 6). A
+                // fixed transform shows upright in every device orientation — the
+                // device tilt and the portrait-locked screen cancel out — so it
+                // needs no UIDevice orientation and keeps working with rotation
+                // lock on, exactly like the live preview. The snapshot then matches
+                // the preview by construction.
+                let orientedImage = ciImage.oriented(.right)
 
                 guard let cgImage = CIContext.shared.createCGImage(orientedImage, from: orientedImage.extent) else { return }
 
