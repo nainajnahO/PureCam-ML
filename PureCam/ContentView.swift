@@ -25,6 +25,12 @@ struct ContentView: View {
     /// Tracks app lifecycle (active, background, inactive) for camera session management.
     @Environment(\.scenePhase) private var scenePhase
 
+    /// width / height of the full screen, measured from a safe-area-ignoring
+    /// background so it matches the preview's `.resizeAspectFill` bounds. Feeds
+    /// the framing indicator's crop math. Default is a typical iPhone aspect,
+    /// replaced on the first layout pass.
+    @State private var screenAspect: CGFloat = 9.0 / 19.5
+
     // MARK: - View Body
 
     var body: some View {
@@ -45,7 +51,7 @@ struct ContentView: View {
                     captureX: positions.captureX,
                     buttonY: positions.buttonY,
                     captureButtonSize: sizes.captureButtonSize,
-                    deviceOrientation: scene.cameraVM.deviceOrientation
+                    deviceOrientation: scene.cameraService.deviceOrientation
                 )
 
                 ButtonUILayer(
@@ -56,12 +62,22 @@ struct ContentView: View {
                     sizes: sizes,
                     positions: positions,
                     textPosition: textPos,
-                    deviceOrientation: scene.cameraVM.deviceOrientation
+                    deviceOrientation: scene.cameraService.deviceOrientation
                 )
             }
             .ignoresSafeArea()
         }
         .background(Color.black.ignoresSafeArea())
+
+        // Measure the full screen (not the safe-area inset) so the framing
+        // indicator's crop fraction matches the preview's actual bounds.
+        .background {
+            Color.clear
+                .ignoresSafeArea()
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.width / proxy.size.height
+                } action: { screenAspect = $0 }
+        }
 
         // LAYER 3: Capture flash overlay (top-most). A brief black flash on
         // capture gives a "camera shutter" feel. See CameraViewModel.triggerCaptureFlash().
@@ -71,6 +87,19 @@ struct ContentView: View {
                     .ignoresSafeArea()
                     .transition(.opacity)
             }
+        }
+
+        // Framing indicator: shows the saved-photo bounds (white) and the
+        // viewfinder's coverage within them (yellow). Aligned to the safe-area
+        // top-trailing corner so it clears the Dynamic Island.
+        .overlay(alignment: .topTrailing) {
+            FramingIndicator(
+                deviceOrientation: scene.cameraService.deviceOrientation,
+                screenAspect: screenAspect,
+                photoAspectRatio: scene.cameraService.photoAspectRatio
+            )
+            .padding(.trailing, 20)
+            .padding(.top, 8)
         }
 
         // Start/stop the camera and haptics as the app moves between foreground
