@@ -103,16 +103,6 @@ struct FramingIndicator: View {
         (isExpanded || !isDimmed) ? 1 : dimmedOpacity
     }
 
-    /// Crop-line colour: a half-opacity yellow while active — deliberately softer
-    /// than the solid white saved-photo box, so it reads as "the live view is
-    /// restricted to here", not "the photo is cropped to here". Goes neutral white
-    /// once the HUD fades to idle, so the faded schematic reads as a calm monochrome
-    /// ghost rather than a stray spot of colour. Snaps back on wake, riding the same
-    /// fade animation.
-    private var cropLineColor: Color {
-        (isExpanded || !isDimmed) ? .yellow.opacity(0.5) : .white.opacity(0.9)
-    }
-
     var body: some View {
         ZStack {
             // Full-sensor frame fills the white box while expanded, aspect-fit so
@@ -135,10 +125,12 @@ struct FramingIndicator: View {
 
             // Yellow = the region the viewfinder currently shows (a subset of the
             // photo), flush on the long-axis edges and inset on the short axis.
-            // Drawn once the preview layer has reported its real crop fraction.
+            // Half-opacity yellow reads as "the live view is restricted to here",
+            // softer than the solid white saved-photo box. Drawn once the preview
+            // layer has reported its real crop fraction.
             if let fraction = shortAxisFraction {
                 RoundedRectangle(cornerRadius: cornerRadius)
-                    .stroke(cropLineColor, lineWidth: lineWidth)
+                    .stroke(.yellow.opacity(0.5), lineWidth: lineWidth)
                     .frame(width: outerSize.width * fraction, height: outerSize.height)
             }
         }
