@@ -416,8 +416,9 @@ class CameraService: NSObject {
             DispatchQueue.global(qos: .userInitiated).async {
                 // Upright in the portrait reference (videoRotationAngle 90° == .right),
                 // exactly like the main preview and RAW snapshot. The framing indicator
-                // applies the device rotation itself (like the exposure text), so the
-                // frame must not be pre-rotated per orientation here.
+                // is fixed to the portrait-locked screen (not counter-rotated like the
+                // exposure text), so the frame uses this same fixed orientation as the
+                // main viewfinder rather than being pre-rotated per device orientation.
                 let oriented = ciImage.oriented(.right)
 
                 // Downscale toward the on-screen size before rasterizing so we
