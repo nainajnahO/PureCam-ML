@@ -48,6 +48,17 @@ struct FramingIndicator: View {
     private let expandedSide: CGFloat = 180
     private let lineWidth: CGFloat = 1.0
 
+    /// Idle-fade tuning: the HUD fades linearly from full strength to its idle
+    /// (grey, near-invisible) state over this duration, restarting on each tap.
+    private let idleFadeSeconds: Double = 3
+    private let dimmedOpacity: CGFloat = 0.15
+
+    /// Whether the HUD has faded to its idle, near-invisible state. Local view
+    /// state — the idle behaviour needs no model involvement.
+    @State private var isDimmed = false
+    /// Bumped on each tap to restart the idle timer (drives the `.task(id:)` below).
+    @State private var wakeToken = 0
+
     /// long / short of the saved photo (from the camera; ≈1.333 for 4:3).
     private var photoAspectRatio: CGFloat { cameraService.photoAspectRatio }
 
@@ -79,11 +90,28 @@ struct FramingIndicator: View {
         return CGSize(width: shortLen, height: maxSide)
     }
 
-    /// Corner radius scaled to the current box size so the collapsed and expanded
-    /// states read as the same gently-rounded shape (a fixed radius would look
-    /// rounder when small and nearly square when expanded). Shared by both boxes
-    /// and the live-preview clip so their corners stay visually consistent.
-    private var cornerRadius: CGFloat { maxSide * 0.07 }
+    /// Fixed corner radius keyed to the collapsed size — the mini state's roundness
+    /// is the look we want, so it stays put rather than growing with the box when
+    /// expanded (a `maxSide`-relative radius would over-round the large state).
+    /// Shared by both boxes and the live-preview clip so their corners stay consistent.
+    private var cornerRadius: CGFloat { collapsedSide * 0.05 }
+
+    /// Resting opacity: full strength while expanded or just after a tap, fading to
+    /// `dimmedOpacity` once idle so the HUD recedes when you're not using it.
+    /// Opacity doesn't affect hit-testing, so the faded box still wakes on tap.
+    private var restingOpacity: CGFloat {
+        (isExpanded || !isDimmed) ? 1 : dimmedOpacity
+    }
+
+    /// Crop-line colour: a half-opacity yellow while active — deliberately softer
+    /// than the solid white saved-photo box, so it reads as "the live view is
+    /// restricted to here", not "the photo is cropped to here". Goes neutral white
+    /// once the HUD fades to idle, so the faded schematic reads as a calm monochrome
+    /// ghost rather than a stray spot of colour. Snaps back on wake, riding the same
+    /// fade animation.
+    private var cropLineColor: Color {
+        (isExpanded || !isDimmed) ? .yellow.opacity(0.5) : .white.opacity(0.9)
+    }
 
     var body: some View {
         ZStack {
@@ -110,7 +138,7 @@ struct FramingIndicator: View {
             // Drawn once the preview layer has reported its real crop fraction.
             if let fraction = shortAxisFraction {
                 RoundedRectangle(cornerRadius: cornerRadius)
-                    .stroke(.yellow, lineWidth: lineWidth)
+                    .stroke(cropLineColor, lineWidth: lineWidth)
                     .frame(width: outerSize.width * fraction, height: outerSize.height)
             }
         }
@@ -119,9 +147,27 @@ struct FramingIndicator: View {
         .frame(minWidth: 44, minHeight: 44)
         // Keep the white edge legible against bright scenes.
         .shadow(color: .black.opacity(0.35), radius: 1)
+        // Recede to near-invisible when idle; full strength while expanded or just tapped.
+        .opacity(restingOpacity)
         // The whole box area toggles the live preview (not just the thin strokes).
         .contentShape(Rectangle())
-        .onTapGesture { onTap() }
+        .onTapGesture {
+            wakeToken += 1   // wake + restart the idle timer
+            onTap()
+        }
         .animation(.easeInOut(duration: 0.2), value: isExpanded)
+        // Idle fade: from first appearance and after each tap, the HUD fades
+        // linearly from full strength to the idle grey over `idleFadeSeconds`.
+        // `isDimmed = false` snaps it back to full; the one-frame pre-sleep lets
+        // that wake commit before the fade begins, so a tap mid-fade jumps to full
+        // first rather than redirecting the in-flight fade from where it was.
+        .task(id: wakeToken) {
+            isDimmed = false
+            try? await Task.sleep(for: .milliseconds(16))
+            guard !Task.isCancelled else { return }
+            withAnimation(.linear(duration: idleFadeSeconds)) {
+                isDimmed = true
+            }
+        }
     }
 }
