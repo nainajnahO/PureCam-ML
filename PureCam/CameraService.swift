@@ -405,6 +405,42 @@ class CameraService: NSObject {
         }
     }
     
+    /// Pull the next full-sensor video frame and render it as an upright,
+    /// downscaled UIImage for the framing-indicator preview. Reuses the same
+    /// on-demand frame source as ML (`captureNextFrame`) — there is no second
+    /// preview layer — so it can never disturb the main viewfinder's connection.
+    /// Returns nil if no frame arrives (e.g. the session is not running).
+    func nextFramingPreviewImage(maxDimension: CGFloat) async -> UIImage? {
+        guard let ciImage = await captureNextFrame() else { return nil }
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Upright in the portrait reference (videoRotationAngle 90° == .right),
+                // exactly like the main preview and RAW snapshot. The framing indicator
+                // applies the device rotation itself (like the exposure text), so the
+                // frame must not be pre-rotated per orientation here.
+                let oriented = ciImage.oriented(.right)
+
+                // Downscale toward the on-screen size before rasterizing so we
+                // never render a full-res buffer ~15×/second.
+                let extent = oriented.extent
+                guard extent.width > 0, extent.height > 0 else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let scale = min(1, maxDimension / max(extent.width, extent.height))
+                let target = scale < 1
+                    ? oriented.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                    : oriented
+
+                guard let cgImage = CIContext.shared.createCGImage(target, from: target.extent) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: UIImage(cgImage: cgImage, scale: 1, orientation: .up))
+            }
+        }
+    }
+
     private func savePhotoAsRAW(rawData: Data) async {
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else { return }

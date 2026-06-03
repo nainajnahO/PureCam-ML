@@ -25,62 +25,103 @@ import SwiftUI
 /// - white rectangle = the saved photo (3:4 in portrait, 4:3 in landscape),
 /// - yellow outline = the region the viewfinder currently shows, flush on the
 ///   long-axis edges and inset to `shortAxisFraction` on the short axis.
+///
+/// Like the viewfinder, the indicator is fixed to the portrait-locked screen — it
+/// is *not* counter-rotated like the exposure text. Turning the phone to landscape
+/// visually rotates the whole thing (frame, live image, and yellow crop lines) with
+/// the device: the box reads wide, and the crop lines that cut the sides in portrait
+/// end up cutting top/bottom — matching what the viewfinder actually crops.
+///
+/// Tapping the box expands it into a larger thumbnail and fills the white
+/// rectangle with a live full-sensor frame (pulled from the camera's video output,
+/// not a second preview layer), letting you see what the cropped main viewfinder
+/// hides; the yellow lines mark the on-screen crop. Tapping again collapses back to
+/// the outline-only schematic and stops the frame pull (zero cost at rest).
 struct FramingIndicator: View {
-    let deviceOrientation: UIDeviceOrientation
-    /// width / height of the full preview area (full screen, ignoring safe area).
-    let screenAspect: CGFloat
+    let cameraService: CameraService
+    let cameraVM: CameraViewModel
+    /// Invoked on tap to toggle the expanded state (owned by `CameraViewModel`).
+    let onTap: () -> Void
+
+    /// Longest edge of the outer rectangle when collapsed / expanded, in points.
+    private let collapsedSide: CGFloat = 44
+    private let expandedSide: CGFloat = 180
+    private let lineWidth: CGFloat = 1.0
+
     /// long / short of the saved photo (from the camera; ≈1.333 for 4:3).
-    let photoAspectRatio: CGFloat
+    private var photoAspectRatio: CGFloat { cameraService.photoAspectRatio }
 
-    /// Longest edge of the outer (saved-photo) rectangle, in points.
-    private let maxSide: CGFloat = 44
-    private let lineWidth: CGFloat = 1.5
+    // Read per-frame state here (not in ContentView) so only this HUD re-renders
+    // at the ~15fps frame cadence — the rest of the UI stays put.
+    private var isExpanded: Bool { cameraVM.framingPreviewExpanded }
+    /// Latest full-sensor frame to show while expanded (nil = not ready / collapsed).
+    private var previewImage: UIImage? { cameraVM.framingPreviewImage }
 
-    private var isLandscape: Bool { deviceOrientation.isLandscape }
+    /// Longest edge of the outer (saved-photo) rectangle. Grows on tap so the live
+    /// full-frame preview is legible, shrinks back to the schematic when collapsed.
+    private var maxSide: CGFloat { isExpanded ? expandedSide : collapsedSide }
 
-    /// Fraction of the photo's short axis the viewfinder covers. `.resizeAspectFill`
-    /// crops the short axis to `screenAspect / (short/long) = screenAspect · (long/short)`.
-    /// Constant across orientations; only which axis is "short" flips. Clamped
-    /// because a screen wider than the photo (e.g. iPad) would crop the long axis
-    /// instead — never happens on this portrait-locked iPhone app, but the clamp
-    /// keeps the inner rect inside the outer regardless.
-    private var shortAxisFraction: CGFloat {
-        min(1, screenAspect * photoAspectRatio)
+    /// Fraction of the photo's short axis the viewfinder covers, read straight
+    /// from the preview layer (AVCaptureVideoPreviewLayer's own crop reporting,
+    /// surfaced via `CameraViewModel.previewCropFraction`). Correct on any screen
+    /// size and safe-area layout because the layer derives it from its real
+    /// bounds — the app never measures the screen itself. nil until the layer
+    /// has first laid out and reported.
+    private var shortAxisFraction: CGFloat? {
+        cameraVM.previewCropFraction
     }
 
-    /// Outer (white) rectangle: long edge = `maxSide`, short edge derived from the
-    /// photo ratio. Orientation decides which screen axis is long.
+    /// Outer (white) rectangle, fixed in the portrait-locked screen: long edge
+    /// (`maxSide`) vertical, short edge from the photo ratio. It never reshapes —
+    /// turning the phone makes the fixed box read wide in landscape on its own.
     private var outerSize: CGSize {
         let shortLen = maxSide / photoAspectRatio
-        return isLandscape
-            ? CGSize(width: maxSide, height: shortLen)   // landscape: wide
-            : CGSize(width: shortLen, height: maxSide)   // portrait: tall
+        return CGSize(width: shortLen, height: maxSide)
     }
 
-    /// Inner (yellow) rectangle: full long axis (flush), `shortAxisFraction` of short.
-    private var innerSize: CGSize {
-        let outer = outerSize
-        return isLandscape
-            ? CGSize(width: outer.width, height: outer.height * shortAxisFraction)
-            : CGSize(width: outer.width * shortAxisFraction, height: outer.height)
-    }
+    /// Corner radius scaled to the current box size so the collapsed and expanded
+    /// states read as the same gently-rounded shape (a fixed radius would look
+    /// rounder when small and nearly square when expanded). Shared by both boxes
+    /// and the live-preview clip so their corners stay visually consistent.
+    private var cornerRadius: CGFloat { maxSide * 0.07 }
 
     var body: some View {
         ZStack {
+            // Full-sensor frame fills the white box while expanded, aspect-fit so
+            // nothing is cropped. Pulled from the camera's video output (never a
+            // second preview layer), so the main viewfinder is untouched. Passive
+            // display — it must NOT hit-test, or it swallows the collapse tap.
+            if isExpanded, let previewImage {
+                Image(uiImage: previewImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: outerSize.width, height: outerSize.height)
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+                    .allowsHitTesting(false)
+            }
+
             // White = full saved-photo bounds.
-            Rectangle()
+            RoundedRectangle(cornerRadius: cornerRadius)
                 .stroke(.white.opacity(0.9), lineWidth: lineWidth)
                 .frame(width: outerSize.width, height: outerSize.height)
 
             // Yellow = the region the viewfinder currently shows (a subset of the
             // photo), flush on the long-axis edges and inset on the short axis.
-            Rectangle()
-                .stroke(.yellow, lineWidth: lineWidth)
-                .frame(width: innerSize.width, height: innerSize.height)
+            // Drawn once the preview layer has reported its real crop fraction.
+            if let fraction = shortAxisFraction {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .stroke(.yellow, lineWidth: lineWidth)
+                    .frame(width: outerSize.width * fraction, height: outerSize.height)
+            }
         }
+        // Guarantee a comfortable tap target even when collapsed (the short axis
+        // is only ~33pt), without enlarging the drawn box.
+        .frame(minWidth: 44, minHeight: 44)
         // Keep the white edge legible against bright scenes.
         .shadow(color: .black.opacity(0.35), radius: 1)
-        .animation(.easeInOut(duration: 0.2), value: isLandscape)
-        .allowsHitTesting(false)
+        // The whole box area toggles the live preview (not just the thin strokes).
+        .contentShape(Rectangle())
+        .onTapGesture { onTap() }
+        .animation(.easeInOut(duration: 0.2), value: isExpanded)
     }
 }

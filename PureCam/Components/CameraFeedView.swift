@@ -20,12 +20,15 @@ struct CameraFeedView: View {
     let cameraService: CameraService
     let showRAWPreview: Bool
     let rawPreviewImage: UIImage?
+    /// Surfaces the preview layer's true short-axis crop fraction up to the view
+    /// model (see `CameraPreview`); drives the framing indicator's yellow box.
+    var onCropFraction: ((CGFloat) -> Void)? = nil
 
     var body: some View {
         if cameraService.status == .configured {
             GeometryReader { geometry in
                 ZStack {
-                    CameraPreview(session: cameraService.session)
+                    CameraPreview(session: cameraService.session, onCropFraction: onCropFraction)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .opacity(showRAWPreview ? 0 : 1)
 

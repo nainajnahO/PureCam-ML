@@ -25,12 +25,6 @@ struct ContentView: View {
     /// Tracks app lifecycle (active, background, inactive) for camera session management.
     @Environment(\.scenePhase) private var scenePhase
 
-    /// width / height of the full screen, measured from a safe-area-ignoring
-    /// background so it matches the preview's `.resizeAspectFill` bounds. Feeds
-    /// the framing indicator's crop math. Default is a typical iPhone aspect,
-    /// replaced on the first layout pass.
-    @State private var screenAspect: CGFloat = 9.0 / 19.5
-
     // MARK: - View Body
 
     var body: some View {
@@ -39,7 +33,10 @@ struct ContentView: View {
             CameraFeedView(
                 cameraService: scene.cameraService,
                 showRAWPreview: scene.cameraVM.showRAWPreview,
-                rawPreviewImage: scene.cameraVM.rawPreviewImage
+                rawPreviewImage: scene.cameraVM.rawPreviewImage,
+                onCropFraction: { fraction in
+                    scene.cameraVM.setPreviewCropFraction(fraction)
+                }
             )
 
             // LAYER 2: Button UI (foreground)
@@ -69,16 +66,6 @@ struct ContentView: View {
         }
         .background(Color.black.ignoresSafeArea())
 
-        // Measure the full screen (not the safe-area inset) so the framing
-        // indicator's crop fraction matches the preview's actual bounds.
-        .background {
-            Color.clear
-                .ignoresSafeArea()
-                .onGeometryChange(for: CGFloat.self) { proxy in
-                    proxy.size.width / proxy.size.height
-                } action: { screenAspect = $0 }
-        }
-
         // LAYER 3: Capture flash overlay (top-most). A brief black flash on
         // capture gives a "camera shutter" feel. See CameraViewModel.triggerCaptureFlash().
         .overlay {
@@ -94,9 +81,12 @@ struct ContentView: View {
         // top-trailing corner so it clears the Dynamic Island.
         .overlay(alignment: .topTrailing) {
             FramingIndicator(
-                deviceOrientation: scene.cameraService.deviceOrientation,
-                screenAspect: screenAspect,
-                photoAspectRatio: scene.cameraService.photoAspectRatio
+                cameraService: scene.cameraService,
+                cameraVM: scene.cameraVM,
+                onTap: {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    scene.cameraVM.toggleFramingPreview()
+                }
             )
             .padding(.trailing, 20)
             .padding(.top, 8)

@@ -36,6 +36,20 @@ class CameraViewModel {
     /// Capture flash effect state
     private(set) var showCaptureFlash = false
 
+    /// Whether the framing-indicator HUD is expanded to show the live full-frame preview.
+    private(set) var framingPreviewExpanded = false
+    /// Latest full-sensor frame shown in the expanded framing indicator (≈15fps while expanded).
+    private(set) var framingPreviewImage: UIImage?
+    /// Drives the frame-pull loop; cancelled on collapse and when backgrounding.
+    private var framingPreviewTask: Task<Void, Never>?
+
+    /// Fraction of the saved photo's short axis the live viewfinder shows — the
+    /// rest is cropped by the preview's aspect-fill. Reported by the preview layer
+    /// itself (AVCaptureVideoPreviewLayer), so it is correct on any screen size /
+    /// safe-area layout without the app ever measuring the screen. nil until the
+    /// layer has laid out and reported.
+    private(set) var previewCropFraction: CGFloat?
+
     // MARK: - Initialization
 
     init(cameraService: CameraService, hapticManager: HapticManager) {
@@ -57,6 +71,8 @@ class CameraViewModel {
             showRAWPreview = false
             rawPreviewImage = nil
             isCapturingPreview = false
+            framingPreviewExpanded = false
+            stopFramingPreviewLoop()
         }
     }
 
@@ -124,5 +140,48 @@ class CameraViewModel {
                 showCaptureFlash = false
             }
         }
+    }
+
+    // MARK: - Framing Indicator
+
+    /// Record the preview layer's reported short-axis crop fraction (see
+    /// `CameraPreview`). Drives the framing indicator's yellow crop rectangle.
+    func setPreviewCropFraction(_ fraction: CGFloat) {
+        previewCropFraction = fraction
+    }
+
+    /// Toggle the framing-indicator HUD between the small outline schematic and
+    /// the expanded live full-frame preview, starting/stopping the frame loop.
+    func toggleFramingPreview() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            framingPreviewExpanded.toggle()
+        }
+        if framingPreviewExpanded {
+            startFramingPreviewLoop()
+        } else {
+            stopFramingPreviewLoop()
+        }
+    }
+
+    /// Continuously pull full-sensor frames from the camera's video output and
+    /// publish them for the expanded indicator. Uses the existing on-demand frame
+    /// API (no second preview layer), so it never disturbs the main viewfinder.
+    private func startFramingPreviewLoop() {
+        framingPreviewTask?.cancel()
+        framingPreviewTask = Task { [weak self] in
+            while let self, self.framingPreviewExpanded, !Task.isCancelled {
+                let image = await self.cameraService.nextFramingPreviewImage(maxDimension: 400)
+                if Task.isCancelled { break }
+                self.framingPreviewImage = image
+                // ~15fps is plenty for a framing diagnostic; caps CPU and SwiftUI churn.
+                try? await Task.sleep(nanoseconds: 66_000_000)
+            }
+        }
+    }
+
+    private func stopFramingPreviewLoop() {
+        framingPreviewTask?.cancel()
+        framingPreviewTask = nil
+        framingPreviewImage = nil
     }
 }
