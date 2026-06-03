@@ -44,9 +44,16 @@ struct FramingIndicator: View {
     let onTap: () -> Void
 
     /// Longest edge of the outer rectangle when collapsed / expanded, in points.
-    private let collapsedSide: CGFloat = 44
-    private let expandedSide: CGFloat = 180
+    /// Multiplied by `hudScale` so the HUD tracks the app's shared `globalScale`
+    /// like the buttons — it stays at today's ~44/180 and grows or shrinks
+    /// proportionally if `globalScale` changes.
+    private var collapsedSide: CGFloat { 44 * hudScale }
+    private var expandedSide: CGFloat { 180 * hudScale }
     private let lineWidth: CGFloat = 1.0
+
+    /// `globalScale` normalised to the scale these point sizes were tuned at (1.5),
+    /// so it's 1.0 today and changes only when `globalScale` does.
+    private var hudScale: CGFloat { UIConstants.globalScale / 1.5 }
 
     /// Idle-fade tuning: the HUD fades linearly from full strength to its idle
     /// (grey, near-invisible) state over this duration, restarting on each tap.
