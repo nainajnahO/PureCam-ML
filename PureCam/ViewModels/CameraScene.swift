@@ -47,9 +47,9 @@ final class CameraScene {
         self.exposureVM = exposureVM
         self.autoExposure = autoExposure
 
-        // Wire up capture callbacks and device-orientation tracking once.
+        // Wire up capture callbacks once. Device orientation is owned by
+        // CameraService, derived from its RotationCoordinator.
         cameraVM.setupCamera()
-        cameraVM.setupOrientationTracking()
     }
 
     /// Forward app lifecycle changes to the view models that care about them.

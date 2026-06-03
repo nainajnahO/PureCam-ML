@@ -35,6 +35,10 @@ class CameraService: NSObject {
     // rotation lock. Must be retained for the lifetime of the session.
     private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
 
+    // Observes the coordinator's capture angle to keep `deviceOrientation` live.
+    // Invalidated on deinit (also auto-invalidates when this token deallocates).
+    private var rotationObservation: NSKeyValueObservation?
+
     // Video output for live frame capture (for ML feature extraction)
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let videoOutputQueue = DispatchQueue(label: "com.purecam.videoOutputQueue")
@@ -55,6 +59,19 @@ class CameraService: NSObject {
     }
     
     var status: Status = .unconfigured
+
+    /// Aspect ratio (long / short) of the saved RAW frame — the full sensor
+    /// readout. Defaults to 4:3 (every iPhone rear sensor) and is set from the
+    /// active format at configuration, so it stays correct on any device/format.
+    private(set) var photoAspectRatio: CGFloat = 4.0 / 3.0
+
+    /// Physical device orientation — the single source of truth for rotating UI
+    /// overlays (buttons, exposure text, framing indicator). Derived from the
+    /// same `RotationCoordinator` that orients the saved photo, so the UI can
+    /// never disagree with the capture. Being gravity-based, it stays correct
+    /// under Control Center rotation lock — the reason `UIDevice` orientation
+    /// notifications (which the lock suppresses) are not used.
+    private(set) var deviceOrientation: UIDeviceOrientation = .portrait
 
     enum CaptureMode {
         case save       // Normal capture - saves to library
@@ -231,7 +248,19 @@ class CameraService: NSObject {
             // Start tracking physical orientation for this device. previewLayer is
             // nil because the preview stays portrait (the app is portrait-locked);
             // we only need the capture angle.
-            rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: nil)
+            let coordinator = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: nil)
+            rotationCoordinator = coordinator
+
+            // Mirror the capture angle into `deviceOrientation` so the UI rotates
+            // from the same gravity-based source that orients the saved photo.
+            // `.initial` seeds the current orientation (correct even when the app
+            // launches in landscape); `.new` then tracks each physical turn.
+            rotationObservation = coordinator.observe(
+                \.videoRotationAngleForHorizonLevelCapture, options: [.initial, .new]
+            ) { [weak self] coordinator, _ in
+                let angle = coordinator.videoRotationAngleForHorizonLevelCapture
+                DispatchQueue.main.async { self?.setDeviceOrientation(forCaptureAngle: angle) }
+            }
             
             if session.canAddOutput(output) {
                 session.addOutput(output)
@@ -239,6 +268,16 @@ class CameraService: NSObject {
                 // Configure for high quality capture
                 if let maxDimensions = camera.activeFormat.supportedMaxPhotoDimensions.last {
                     output.maxPhotoDimensions = maxDimensions
+
+                    // The saved RAW shares these dimensions' aspect ratio (RAW is
+                    // the full sensor). Orientation is handled in the view, so just
+                    // expose the orientation-agnostic long/short ratio.
+                    let long = CGFloat(max(maxDimensions.width, maxDimensions.height))
+                    let short = CGFloat(min(maxDimensions.width, maxDimensions.height))
+                    if short > 0 {
+                        let ratio = long / short
+                        DispatchQueue.main.async { self.photoAspectRatio = ratio }
+                    }
                 }
             } else {
                 throw CameraError.cannotAddOutput
@@ -271,7 +310,27 @@ class CameraService: NSObject {
             }
         }
     }
-    
+
+    /// Maps the rear-camera horizon-level capture angle (0/90/180/270°) to a
+    /// device orientation for rotating UI overlays. Portrait (90°) and upside-
+    /// down (270°) are gravity-unambiguous; the landscape pair (0° → left,
+    /// 180° → right) is the on-device-confirmed assignment — the capture angle
+    /// and UIDeviceOrientation's left/right naming run opposite ways.
+    /// Call on the main thread — it publishes to `@Observable` UI.
+    private func setDeviceOrientation(forCaptureAngle angle: CGFloat) {
+        let orientation: UIDeviceOrientation
+        switch Int(angle.rounded()) {
+        case 90:  orientation = .portrait
+        case 270: orientation = .portraitUpsideDown
+        case 0:   orientation = .landscapeLeft
+        case 180: orientation = .landscapeRight
+        default:  return
+        }
+        if orientation != deviceOrientation {
+            deviceOrientation = orientation
+        }
+    }
+
     func startSession() {
         guard status == .configured else { return }
         // Start the session on the background thread
@@ -346,6 +405,43 @@ class CameraService: NSObject {
         }
     }
     
+    /// Pull the next full-sensor video frame and render it as an upright,
+    /// downscaled UIImage for the framing-indicator preview. Reuses the same
+    /// on-demand frame source as ML (`captureNextFrame`) — there is no second
+    /// preview layer — so it can never disturb the main viewfinder's connection.
+    /// Returns nil if no frame arrives (e.g. the session is not running).
+    func nextFramingPreviewImage(maxDimension: CGFloat) async -> UIImage? {
+        guard let ciImage = await captureNextFrame() else { return nil }
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Upright in the portrait reference (videoRotationAngle 90° == .right),
+                // exactly like the main preview and RAW snapshot. The framing indicator
+                // is fixed to the portrait-locked screen (not counter-rotated like the
+                // exposure text), so the frame uses this same fixed orientation as the
+                // main viewfinder rather than being pre-rotated per device orientation.
+                let oriented = ciImage.oriented(.right)
+
+                // Downscale toward the on-screen size before rasterizing so we
+                // never render a full-res buffer ~15×/second.
+                let extent = oriented.extent
+                guard extent.width > 0, extent.height > 0 else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let scale = min(1, maxDimension / max(extent.width, extent.height))
+                let target = scale < 1
+                    ? oriented.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                    : oriented
+
+                guard let cgImage = CIContext.shared.createCGImage(target, from: target.extent) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: UIImage(cgImage: cgImage, scale: 1, orientation: .up))
+            }
+        }
+    }
+
     private func savePhotoAsRAW(rawData: Data) async {
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else { return }
@@ -365,6 +461,10 @@ class CameraService: NSObject {
         } catch {
             Logger.camera.error("Failed to save RAW: \(error.localizedDescription)")
         }
+    }
+
+    deinit {
+        rotationObservation?.invalidate()
     }
 }
 

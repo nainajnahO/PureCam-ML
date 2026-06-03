@@ -33,7 +33,10 @@ struct ContentView: View {
             CameraFeedView(
                 cameraService: scene.cameraService,
                 showRAWPreview: scene.cameraVM.showRAWPreview,
-                rawPreviewImage: scene.cameraVM.rawPreviewImage
+                rawPreviewImage: scene.cameraVM.rawPreviewImage,
+                onCropFraction: { fraction in
+                    scene.cameraVM.setPreviewCropFraction(fraction)
+                }
             )
 
             // LAYER 2: Button UI (foreground)
@@ -45,7 +48,7 @@ struct ContentView: View {
                     captureX: positions.captureX,
                     buttonY: positions.buttonY,
                     captureButtonSize: sizes.captureButtonSize,
-                    deviceOrientation: scene.cameraVM.deviceOrientation
+                    deviceOrientation: scene.cameraService.deviceOrientation
                 )
 
                 ButtonUILayer(
@@ -56,7 +59,7 @@ struct ContentView: View {
                     sizes: sizes,
                     positions: positions,
                     textPosition: textPos,
-                    deviceOrientation: scene.cameraVM.deviceOrientation
+                    deviceOrientation: scene.cameraService.deviceOrientation
                 )
             }
             .ignoresSafeArea()
@@ -71,6 +74,22 @@ struct ContentView: View {
                     .ignoresSafeArea()
                     .transition(.opacity)
             }
+        }
+
+        // Framing indicator: shows the saved-photo bounds (white) and the
+        // viewfinder's coverage within them (yellow). Aligned to the safe-area
+        // top-trailing corner so it clears the Dynamic Island.
+        .overlay(alignment: .topTrailing) {
+            FramingIndicator(
+                cameraService: scene.cameraService,
+                cameraVM: scene.cameraVM,
+                onTap: {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    scene.cameraVM.toggleFramingPreview()
+                }
+            )
+            .padding(.trailing, 20)
+            .padding(.top, 8)
         }
 
         // Start/stop the camera and haptics as the app moves between foreground

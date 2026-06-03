@@ -16,7 +16,6 @@
 
 import SwiftUI
 import Observation
-import CoreMotion
 
 /// ViewModel responsible for camera lifecycle, orientation tracking, and preview management
 /// Extracts camera-related business logic from ContentView
@@ -27,16 +26,7 @@ class CameraViewModel {
     private let cameraService: CameraService
     private let hapticManager: HapticManager
 
-    /// Reads the motion sensors directly to derive device orientation. Unlike
-    /// `UIDevice` orientation notifications — which are suppressed while Control
-    /// Center's rotation lock is on (verified on-device) — Core Motion is
-    /// unaffected by the lock, the same reason capture orientation works under it.
-    private let motionManager = CMMotionManager()
-
     // MARK: - State
-
-    /// Current device orientation
-    private(set) var deviceOrientation: UIDeviceOrientation = .portrait
 
     /// RAW preview state
     private(set) var showRAWPreview = false
@@ -45,6 +35,20 @@ class CameraViewModel {
 
     /// Capture flash effect state
     private(set) var showCaptureFlash = false
+
+    /// Whether the framing-indicator HUD is expanded to show the live full-frame preview.
+    private(set) var framingPreviewExpanded = false
+    /// Latest full-sensor frame shown in the expanded framing indicator (≈15fps while expanded).
+    private(set) var framingPreviewImage: UIImage?
+    /// Drives the frame-pull loop; cancelled on collapse and when backgrounding.
+    private var framingPreviewTask: Task<Void, Never>?
+
+    /// Fraction of the saved photo's short axis the live viewfinder shows — the
+    /// rest is cropped by the preview's aspect-fill. Reported by the preview layer
+    /// itself (AVCaptureVideoPreviewLayer), so it is correct on any screen size /
+    /// safe-area layout without the app ever measuring the screen. nil until the
+    /// layer has laid out and reported.
+    private(set) var previewCropFraction: CGFloat?
 
     // MARK: - Initialization
 
@@ -60,15 +64,15 @@ class CameraViewModel {
         if newPhase == .active {
             cameraService.startSession()
             hapticManager.start()
-            startOrientationUpdates()
             autoExposureManager?.resetForNewSession()
         } else if newPhase == .background || newPhase == .inactive {
             cameraService.stopSession()
             hapticManager.stop()
-            stopOrientationUpdates()
             showRAWPreview = false
             rawPreviewImage = nil
             isCapturingPreview = false
+            framingPreviewExpanded = false
+            stopFramingPreviewLoop()
         }
     }
 
@@ -124,42 +128,6 @@ class CameraViewModel {
         }
     }
 
-    /// Setup device orientation tracking (call on view appear)
-    func setupOrientationTracking() {
-        startOrientationUpdates()
-    }
-
-    /// Start deriving device orientation from the gravity vector. Idempotent —
-    /// safe to call again when returning to the foreground.
-    private func startOrientationUpdates() {
-        guard motionManager.isDeviceMotionAvailable, !motionManager.isDeviceMotionActive else { return }
-
-        motionManager.deviceMotionUpdateInterval = 0.2  // ~5 Hz is plenty for orientation
-        motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
-            guard let self, let gravity = motion?.gravity else { return }
-
-            // Near-flat (phone face up/down): the horizontal gravity component is
-            // too small to distinguish portrait from landscape, so keep the last
-            // orientation — matching the previous .faceUp/.faceDown drop.
-            guard hypot(gravity.x, gravity.y) > 0.3 else { return }
-
-            let orientation: UIDeviceOrientation
-            if abs(gravity.y) >= abs(gravity.x) {
-                orientation = gravity.y <= 0 ? .portrait : .portraitUpsideDown
-            } else {
-                orientation = gravity.x > 0 ? .landscapeRight : .landscapeLeft
-            }
-
-            if orientation != self.deviceOrientation {
-                self.deviceOrientation = orientation
-            }
-        }
-    }
-
-    private func stopOrientationUpdates() {
-        motionManager.stopDeviceMotionUpdates()
-    }
-
     // MARK: - Capture Flash Animation
 
     /// Trigger the capture flash animation
@@ -174,9 +142,46 @@ class CameraViewModel {
         }
     }
 
-    // MARK: - Cleanup
+    // MARK: - Framing Indicator
 
-    deinit {
-        motionManager.stopDeviceMotionUpdates()
+    /// Record the preview layer's reported short-axis crop fraction (see
+    /// `CameraPreview`). Drives the framing indicator's yellow crop rectangle.
+    func setPreviewCropFraction(_ fraction: CGFloat) {
+        previewCropFraction = fraction
+    }
+
+    /// Toggle the framing-indicator HUD between the small outline schematic and
+    /// the expanded live full-frame preview, starting/stopping the frame loop.
+    func toggleFramingPreview() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            framingPreviewExpanded.toggle()
+        }
+        if framingPreviewExpanded {
+            startFramingPreviewLoop()
+        } else {
+            stopFramingPreviewLoop()
+        }
+    }
+
+    /// Continuously pull full-sensor frames from the camera's video output and
+    /// publish them for the expanded indicator. Uses the existing on-demand frame
+    /// API (no second preview layer), so it never disturbs the main viewfinder.
+    private func startFramingPreviewLoop() {
+        framingPreviewTask?.cancel()
+        framingPreviewTask = Task { [weak self] in
+            while let self, self.framingPreviewExpanded, !Task.isCancelled {
+                let image = await self.cameraService.nextFramingPreviewImage(maxDimension: 400)
+                if Task.isCancelled { break }
+                self.framingPreviewImage = image
+                // ~15fps is plenty for a framing diagnostic; caps CPU and SwiftUI churn.
+                try? await Task.sleep(nanoseconds: 66_000_000)
+            }
+        }
+    }
+
+    private func stopFramingPreviewLoop() {
+        framingPreviewTask?.cancel()
+        framingPreviewTask = nil
+        framingPreviewImage = nil
     }
 }
