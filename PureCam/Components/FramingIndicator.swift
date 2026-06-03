@@ -118,10 +118,13 @@ struct FramingIndicator: View {
                     .allowsHitTesting(false)
             }
 
-            // White = full saved-photo bounds.
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .stroke(.white.opacity(0.9), lineWidth: lineWidth)
-                .frame(width: outerSize.width, height: outerSize.height)
+            // White = full saved-photo bounds. Hidden while expanded — the live
+            // frame already fills those exact bounds, so its own edge shows them.
+            if !isExpanded {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .stroke(.white.opacity(0.9), lineWidth: lineWidth)
+                    .frame(width: outerSize.width, height: outerSize.height)
+            }
 
             // Yellow = the region the viewfinder currently shows (a subset of the
             // photo), flush on the long-axis edges and inset on the short axis.
