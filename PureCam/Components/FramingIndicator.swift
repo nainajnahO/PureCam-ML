@@ -63,8 +63,15 @@ struct FramingIndicator: View {
     /// Whether the HUD has faded to its idle, near-invisible state. Local view
     /// state — the idle behaviour needs no model involvement.
     @State private var isDimmed = false
-    /// Bumped on each tap to restart the idle timer (drives the `.task(id:)` below).
+    /// Bumped on each tap — and when the app returns to the foreground — to restart
+    /// the idle timer (drives the `.task(id:)` below).
     @State private var wakeToken = 0
+
+    /// App lifecycle. Returning to `.active` re-wakes the HUD: backgrounding fires
+    /// neither `onDisappear` nor `onAppear` for the active scene, so the idle-fade
+    /// `.task` is never restarted on its own and the HUD would otherwise come back
+    /// stuck at `dimmedOpacity` instead of waking like it does on first launch.
+    @Environment(\.scenePhase) private var scenePhase
 
     /// long / short of the saved photo (from the camera; ≈1.333 for 4:3).
     private var photoAspectRatio: CGFloat { cameraService.photoAspectRatio }
@@ -169,6 +176,15 @@ struct FramingIndicator: View {
             guard !Task.isCancelled else { return }
             withAnimation(.linear(duration: idleFadeSeconds)) {
                 isDimmed = true
+            }
+        }
+        // Re-wake on return to the foreground. `onChange` ignores the initial
+        // `.active`, so first launch is left to the `.task` above; only a genuine
+        // background→active transition bumps the token, snapping the HUD to full
+        // strength and restarting the fade — exactly as a tap does.
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                wakeToken += 1
             }
         }
     }
