@@ -17,6 +17,7 @@
 import CoreML
 import SwiftUI
 import Observation
+import UIKit
 
 @Observable
 class AutoExposureManager {
@@ -47,7 +48,7 @@ class AutoExposureManager {
         self.dataManager = dataManager
         loadModel()
 
-        // Listen for model updates
+        // Reload the model whenever a training run finishes successfully.
         NotificationCenter.default.addObserver(
             forName: .mlModelUpdated,
             object: nil,
@@ -313,15 +314,18 @@ class AutoExposureManager {
             return
         }
 
-        // Trigger training
-        print("Starting training: device charging + \(dataManager.dataset.samples.count) samples")
-
-        if #available(iOS 15.0, *) {
-            let trainer = ModelTrainer(modelURL: getModelURL(), dataManager: dataManager)
-            trainer.scheduleBackgroundTrainingIfNeeded()
-        } else {
-            print("Training requires iOS 15+")
+        // Single-flight: the capture trigger and the battery-state trigger can fire
+        // close together — don't launch a second run on top of one already going.
+        guard !ModelTrainer.isCurrentlyTraining else {
+            print("Training already in progress — skipping")
+            return
         }
+
+        let sampleCount = dataManager.dataset.samples.count
+        print("Starting training: device charging + \(sampleCount) samples")
+
+        let trainer = ModelTrainer(modelURL: getModelURL(), dataManager: dataManager)
+        trainer.train { _ in }
     }
 
     // MARK: - Rotation Angle Calculation (Inverse Mapping)
@@ -359,4 +363,5 @@ class AutoExposureManager {
 
 extension Notification.Name {
     static let mlModelUpdated = Notification.Name("MLModelUpdated")
+    static let mlModelTrainingFailed = Notification.Name("MLModelTrainingFailed")
 }
