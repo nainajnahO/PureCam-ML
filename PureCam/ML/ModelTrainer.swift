@@ -18,128 +18,180 @@ import CoreML
 import CreateML
 import TabularData
 import Foundation
+import UIKit
 
-/// Handles on-device model training using MLUpdateTask
+/// Handles on-device model training (two sequential MLBoostedTreeRegressors).
+///
+/// Both the foreground path (`AutoExposureManager`) and the overnight background
+/// path (`TrainingBackgroundScheduler`) funnel through `train(completion:)`, which
+/// enforces a single in-flight run so the two can never collide on the fixed model
+/// filenames they write.
 @available(iOS 15.0, *)
 class ModelTrainer {
+
+    enum TrainingError: Error {
+        /// Another run is already in progress — this request was ignored.
+        case alreadyRunning
+    }
+
     private let modelURL: URL
     private let dataManager: TrainingDataManager
+
+    // Shared single-flight guard across the foreground + background training paths.
+    private static let lock = NSLock()
+    private static var _isTraining = false
+
+    /// Whether a training run is currently active anywhere in the app. Callers
+    /// check this before kicking off work (and before showing UI for it).
+    static var isCurrentlyTraining: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _isTraining
+    }
 
     init(modelURL: URL, dataManager: TrainingDataManager) {
         self.modelURL = modelURL
         self.dataManager = dataManager
     }
 
-    /// Schedule background training if conditions are met
-    func scheduleBackgroundTrainingIfNeeded() {
-        guard dataManager.dataset.isReadyForTraining else {
-            print("Not enough training data: \(dataManager.dataset.samples.count)/30")
+    /// Train on a background queue, then post `.mlModelUpdated` (success) or
+    /// `.mlModelTrainingFailed` (failure) and call `completion` on the main queue.
+    ///
+    /// The work is wrapped in a background-time assertion so a foreground-initiated
+    /// run still finishes (~10s) if the user backgrounds the app mid-train. Returns
+    /// immediately with `.alreadyRunning` if another run is in flight.
+    func train(completion: @escaping (Result<Void, Error>) -> Void) {
+        Self.lock.lock()
+        if Self._isTraining {
+            Self.lock.unlock()
+            print("Training already in progress — ignoring duplicate request")
+            completion(.failure(TrainingError.alreadyRunning))
             return
         }
+        Self._isTraining = true
+        Self.lock.unlock()
 
-        print("Scheduling background training with \(dataManager.dataset.samples.count) samples")
+        print("Scheduling training with \(dataManager.dataset.samples.count) samples")
 
-        // For now, we'll train immediately on a background queue
-        // In a production app, you would use BGProcessingTask for true background execution
+        // Background-time assertion so the run survives a mid-train backgrounding.
+        var bgTask: UIBackgroundTaskIdentifier = .invalid
+        bgTask = UIApplication.shared.beginBackgroundTask(withName: "ModelTraining") {
+            UIApplication.shared.endBackgroundTask(bgTask)
+            bgTask = .invalid
+        }
+
         DispatchQueue.global(qos: .background).async { [self] in
-            print("Background task started")
-            self.trainModel()
+            let result: Result<Void, Error>
+            do {
+                try performTraining()
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+
+            Self.lock.lock(); Self._isTraining = false; Self.lock.unlock()
+
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    print("Model training completed")
+                    NotificationCenter.default.post(name: .mlModelUpdated, object: nil)
+                case .failure(let error):
+                    print("Model training failed: \(error)")
+                    NotificationCenter.default.post(name: .mlModelTrainingFailed, object: nil)
+                }
+                completion(result)
+                if bgTask != .invalid {
+                    UIApplication.shared.endBackgroundTask(bgTask)
+                    bgTask = .invalid
+                }
+            }
         }
     }
 
-    /// Train model synchronously (called on background queue)
-    private func trainModel() {
+    /// Train synchronously (called on a background queue by `train`). Throws on any
+    /// failure so the caller can report it.
+    private func performTraining() throws {
         print("Starting model training...")
 
         let startTime = Date()
 
-        do {
-            // Prepare training data
-            print("Step 1: Preparing training data...")
-            let (features, targets) = prepareTrainingData()
-            print("Prepared \(features.count) samples with \(features[0].count) features each")
+        // Prepare training data
+        print("Step 1: Preparing training data...")
+        let (features, targets) = prepareTrainingData()
+        print("Prepared \(features.count) samples with \(features[0].count) features each")
 
-            // SEQUENTIAL PREDICTION: Two-stage model training
+        // SEQUENTIAL PREDICTION: Two-stage model training
 
-            // Stage 1: Train ISO model (scene features → ISO)
-            print("Step 2: Creating DataFrame for ISO model...")
-            let isoDataFrame = DataFrameBuilder.createISODataFrame(
-                features: features,
-                isoTargets: targets.map { $0.0 }
-            )
-            print("ISO DataFrame created with \(isoDataFrame.rows.count) rows")
+        // Stage 1: Train ISO model (scene features → ISO)
+        print("Step 2: Creating DataFrame for ISO model...")
+        let isoDataFrame = DataFrameBuilder.createISODataFrame(
+            features: features,
+            isoTargets: targets.map { $0.0 }
+        )
+        print("ISO DataFrame created with \(isoDataFrame.rows.count) rows")
 
-            print("Step 3: Training ISO model...")
-            let isoRegressor = try MLBoostedTreeRegressor(
-                trainingData: isoDataFrame,
-                targetColumn: "targetISO"
-            )
-            print("ISO model trained successfully")
+        print("Step 3: Training ISO model...")
+        let isoRegressor = try MLBoostedTreeRegressor(
+            trainingData: isoDataFrame,
+            targetColumn: "targetISO"
+        )
+        print("ISO model trained successfully")
 
-            // Stage 2: Train shutter model with ISO as additional feature
-            print("Step 4: Creating DataFrame for shutter model...")
-            let shutterDataFrame = DataFrameBuilder.createShutterDataFrame(
-                features: features,
-                isoTargets: targets.map { $0.0 },
-                shutterTargets: targets.map { $0.1 }
-            )
-            print("Shutter DataFrame created with \(shutterDataFrame.rows.count) rows")
+        // Stage 2: Train shutter model with ISO as additional feature
+        print("Step 4: Creating DataFrame for shutter model...")
+        let shutterDataFrame = DataFrameBuilder.createShutterDataFrame(
+            features: features,
+            isoTargets: targets.map { $0.0 },
+            shutterTargets: targets.map { $0.1 }
+        )
+        print("Shutter DataFrame created with \(shutterDataFrame.rows.count) rows")
 
-            print("Step 5: Training shutter model...")
-            let shutterRegressor = try MLBoostedTreeRegressor(
-                trainingData: shutterDataFrame,
-                targetColumn: "targetShutterSeconds"
-            )
-            print("Shutter model trained successfully")
+        print("Step 5: Training shutter model...")
+        let shutterRegressor = try MLBoostedTreeRegressor(
+            trainingData: shutterDataFrame,
+            targetColumn: "targetShutterSeconds"
+        )
+        print("Shutter model trained successfully")
 
-            // Save both models
-            print("Step 6: Saving models...")
-            let tempDir = FileManager.default.temporaryDirectory
-            let isoModelURL = tempDir.appendingPathComponent("ISORegressor.mlmodel")
-            let shutterModelURL = tempDir.appendingPathComponent("ShutterRegressor.mlmodel")
+        // Save both models
+        print("Step 6: Saving models...")
+        let tempDir = FileManager.default.temporaryDirectory
+        let isoModelURL = tempDir.appendingPathComponent("ISORegressor.mlmodel")
+        let shutterModelURL = tempDir.appendingPathComponent("ShutterRegressor.mlmodel")
 
-            let metadata = MLModelMetadata(
-                author: "PureCam",
-                shortDescription: "Auto-exposure regressor trained on user preferences (sequential prediction)",
-                version: "1.0"
-            )
+        let metadata = MLModelMetadata(
+            author: "PureCam",
+            shortDescription: "Auto-exposure regressor trained on user preferences (sequential prediction)",
+            version: "1.0"
+        )
 
-            try isoRegressor.write(to: isoModelURL, metadata: metadata)
-            try shutterRegressor.write(to: shutterModelURL, metadata: metadata)
-            print("Saved uncompiled models")
+        try isoRegressor.write(to: isoModelURL, metadata: metadata)
+        try shutterRegressor.write(to: shutterModelURL, metadata: metadata)
+        print("Saved uncompiled models")
 
-            // Compile models (required for iOS runtime)
-            print("Step 7: Compiling models...")
-            let compiledISOURL = try MLModel.compileModel(at: isoModelURL)
-            let compiledShutterURL = try MLModel.compileModel(at: shutterModelURL)
-            print("Models compiled successfully")
+        // Compile models (required for iOS runtime)
+        print("Step 7: Compiling models...")
+        let compiledISOURL = try MLModel.compileModel(at: isoModelURL)
+        let compiledShutterURL = try MLModel.compileModel(at: shutterModelURL)
+        print("Models compiled successfully")
 
-            // Copy compiled models to documents directory
-            print("Step 8: Installing models...")
-            let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let finalISOURL = documentsPath.appendingPathComponent("ISORegressor.mlmodelc")
-            let finalShutterURL = documentsPath.appendingPathComponent("ShutterRegressor.mlmodelc")
+        // Copy compiled models to documents directory
+        print("Step 8: Installing models...")
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let finalISOURL = documentsPath.appendingPathComponent("ISORegressor.mlmodelc")
+        let finalShutterURL = documentsPath.appendingPathComponent("ShutterRegressor.mlmodelc")
 
-            // Remove old models if they exist
-            try? FileManager.default.removeItem(at: finalISOURL)
-            try? FileManager.default.removeItem(at: finalShutterURL)
-            try? FileManager.default.removeItem(at: modelURL)  // Remove old combined model
+        // Remove old models if they exist
+        try? FileManager.default.removeItem(at: finalISOURL)
+        try? FileManager.default.removeItem(at: finalShutterURL)
+        try? FileManager.default.removeItem(at: modelURL)  // Remove old combined model
 
-            try FileManager.default.copyItem(at: compiledISOURL, to: finalISOURL)
-            try FileManager.default.copyItem(at: compiledShutterURL, to: finalShutterURL)
-            print("Models installed to Documents directory")
+        try FileManager.default.copyItem(at: compiledISOURL, to: finalISOURL)
+        try FileManager.default.copyItem(at: compiledShutterURL, to: finalShutterURL)
+        print("Models installed to Documents directory")
 
-            let elapsed = Date().timeIntervalSince(startTime)
-            print("Model training completed in \(String(format: "%.1f", elapsed))s")
-
-            // Notify that model has been updated
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: .mlModelUpdated, object: nil)
-            }
-
-        } catch {
-            print("Model training failed: \(error)")
-        }
+        let elapsed = Date().timeIntervalSince(startTime)
+        print("Model training completed in \(String(format: "%.1f", elapsed))s")
     }
 
     /// Prepare training data from samples
