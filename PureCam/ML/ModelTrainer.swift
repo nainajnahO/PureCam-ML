@@ -22,10 +22,11 @@ import UIKit
 
 /// Handles on-device model training (two sequential MLBoostedTreeRegressors).
 ///
-/// Both the foreground path (`AutoExposureManager`) and the overnight background
-/// path (`TrainingBackgroundScheduler`) funnel through `train(completion:)`, which
-/// enforces a single in-flight run so the two can never collide on the fixed model
-/// filenames they write.
+/// Training is kicked off by `AutoExposureManager`, which can call `train(completion:)`
+/// from two triggers that may land close together — recording a new sample while the
+/// device is charging, and the battery transitioning to charging. The single in-flight
+/// run enforced here keeps those triggers from launching overlapping runs that would
+/// collide on the fixed model filenames they write.
 @available(iOS 15.0, *)
 class ModelTrainer {
 
