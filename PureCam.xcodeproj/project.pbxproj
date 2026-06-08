@@ -275,7 +275,7 @@
 				INFOPLIST_FILE = PureCamControls/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = PureCamControls;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -307,7 +307,7 @@
 				INFOPLIST_FILE = PureCamControls/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = PureCamControls;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
