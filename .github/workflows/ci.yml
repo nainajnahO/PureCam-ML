@@ -30,11 +30,11 @@ jobs:
       # CreateML, which only exists in the device SDK. Code signing is off
       # because cloud runners have no signing certificates — we only need to
       # confirm the project compiles, not produce an installable build.
-      - name: Build PureCam
+      - name: Build PureLenz
         run: |
           xcodebuild build \
-            -project PureCam.xcodeproj \
-            -scheme PureCam \
+            -project PureLenz.xcodeproj \
+            -scheme PureLenz \
             -configuration Debug \
             -destination 'generic/platform=iOS' \
             CODE_SIGNING_ALLOWED=NO \

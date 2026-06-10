@@ -1,8 +1,8 @@
-# PureCam
+# PureLenz
 
 **An intelligent iOS camera app that learns your photography style**
 
-[![CI](https://github.com/nainajnahO/PureCam-ML/actions/workflows/ci.yml/badge.svg)](https://github.com/nainajnahO/PureCam-ML/actions/workflows/ci.yml)
+[![CI](https://github.com/nainajnahO/PureLenz/actions/workflows/ci.yml/badge.svg)](https://github.com/nainajnahO/PureLenz/actions/workflows/ci.yml)
 ![iOS](https://img.shields.io/badge/iOS-26.0+-blue)
 ![Swift](https://img.shields.io/badge/Swift-5.9+-orange)
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-6.0-green)
@@ -13,11 +13,11 @@
 
 <table>
   <tr>
-    <td><img src="PureCam/media/B.jpeg" /></td>
-    <td rowspan="2"><img src="PureCam/media/D.jpeg" /></td>
+    <td><img src="PureLenz/media/B.jpeg" /></td>
+    <td rowspan="2"><img src="PureLenz/media/D.jpeg" /></td>
   </tr>
   <tr>
-    <td><img src="PureCam/media/A.jpeg" /></td>
+    <td><img src="PureLenz/media/A.jpeg" /></td>
   </tr>
 </table>
  
@@ -26,7 +26,7 @@
 
 ## What Does This App Do?
 
-PureCam is a professional camera app for iPhone that **learns how you like to take photos** and automatically adjusts camera settings to match your style. Think of it as having a photography assistant that studies your preferences and prepares the camera exactly how you want it.
+PureLenz is a professional camera app for iPhone that **learns how you like to take photos** and automatically adjusts camera settings to match your style. Think of it as having a photography assistant that studies your preferences and prepares the camera exactly how you want it.
 
 ### The Problem It Solves
 
@@ -35,7 +35,7 @@ Most camera apps use generic automatic settings that work "okay" for everyone bu
 - **ISO** (how sensitive the camera is to light)
 - **Shutter Speed** (how long the camera captures light)
 
-PureCam eliminates this repetitive work by learning your personal preferences and predicting the perfect settings for each scene.
+PureLenz eliminates this repetitive work by learning your personal preferences and predicting the perfect settings for each scene.
 
 ---
 
@@ -54,7 +54,7 @@ The app captures **pure, unprocessed RAW photos** (professional format) with no 
 
 ### 1. Machine Learning That Runs On Your Phone
 
-Most AI apps send your data to cloud servers. PureCam does everything **privately on your device**:
+Most AI apps send your data to cloud servers. PureLenz does everything **privately on your device**:
 - Analyzes scenes by extracting 13 different characteristics (brightness patterns, color temperature, contrast, etc.)
 - Trains a custom AI model that learns the relationship between what you see and how you shoot
 - Makes predictions in under 50 milliseconds—faster than you can blink
@@ -105,7 +105,7 @@ The app processes high-resolution camera frames in real-time while:
 - **Core ML** - On-device machine learning
 - **CreateML** - Model training with MLBoostedTreeRegressor
 - **Accelerate Framework** - Hardware-accelerated math (vDSP for vectorized statistics)
-- **Combine** - Reactive state management with @Observable pattern
+- **Observation** - Modern reactive state via @Observable
 
 ### Architecture Decisions
 - **Sequential prediction pipeline**: Two-stage ML (ISO → Shutter) to model coupled variables
@@ -134,7 +134,7 @@ The app processes high-resolution camera frames in real-time while:
 
 | Skill | How This Project Shows It |
 |-------|---------------------------|
-| **iOS Development** | Native app using latest SwiftUI and iOS 15+ APIs |
+| **iOS Development** | Native app using latest SwiftUI and iOS 26+ APIs |
 | **Machine Learning** | Custom on-device training pipeline with Core ML |
 | **Computer Vision** | Real-time scene analysis from camera frames |
 | **Performance Optimization** | Vectorized math, efficient memory management, <150ms startup |
@@ -152,13 +152,13 @@ As a photographer and developer, I was frustrated with:
 2. **Repetitive manual adjustments** for similar scenes
 3. **Privacy concerns** with cloud-based AI assistants
 
-PureCam combines my passions for photography and machine learning to create a tool that's both powerful and respectful of the user.
+PureLenz combines my passions for photography and machine learning to create a tool that's both powerful and respectful of the user.
 
 ---
 
 
 ## License
-+ This project is licensed under the **GNU General Public License v3.0**. 
+This project is licensed under the **GNU General Public License v3.0**.
 ---
 
 *Built with passion for photography and machine learning • 2025*

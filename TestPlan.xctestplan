@@ -12,7 +12,13 @@
     "testTimeoutsEnabled" : true
   },
   "testTargets" : [
-
+    {
+      "target" : {
+        "containerPath" : "container:PureLenz.xcodeproj",
+        "identifier" : "3CD702E22FDA1D76001D90C4",
+        "name" : "PureLenzTests"
+      }
+    }
   ],
   "version" : 1
 }
