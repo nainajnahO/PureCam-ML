@@ -22,6 +22,25 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         return .portrait
     }
+
+    // REGISTER SETTINGS DEFAULTS
+    //
+    // Values configured in the Settings.bundle (Settings app) aren't copied into
+    // UserDefaults until the user actually opens the app's Settings page. Registering
+    // matching defaults here — before any view or read — guarantees the app always has
+    // a known value. Keep these identical to the DefaultValue entries in Root.plist.
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        UserDefaults.standard.register(defaults: [
+            "showFramingIndicator": true,
+            "autoExposureOnLaunch": true,
+            "contributeTrainingData": true,
+            "maxTrainingSamples": 500
+        ])
+        return true
+    }
 }
 
 @main

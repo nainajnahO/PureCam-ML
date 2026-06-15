@@ -37,7 +37,10 @@ class TrainingDataManager {
 
     /// Add a new training sample and persist to disk
     func addSample(_ sample: TrainingSample) {
-        dataset.addSample(sample)
+        // FIFO cap configured via the Settings app (Max training samples). The `> 0`
+        // check guards against an unregistered/zero read by falling back to 500.
+        let cap = UserDefaults.standard.integer(forKey: "maxTrainingSamples")
+        dataset.addSample(sample, maxSamples: cap > 0 ? cap : 500)
         saveDataset()
         print("Added training sample (\(dataset.samples.count) total)")
     }

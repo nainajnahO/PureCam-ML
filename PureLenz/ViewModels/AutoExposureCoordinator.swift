@@ -97,6 +97,9 @@ class AutoExposureCoordinator: NSObject {
 
     /// Record training sample if needed (called on manual photo capture)
     func recordTrainingSampleIfNeeded() {
+        // Respect the user's "Contribute to on-device AI training" setting (Settings app).
+        guard UserDefaults.standard.bool(forKey: "contributeTrainingData") else { return }
+
         // Record training sample if:
         // 1. No model exists yet (.disabled) - collecting initial training data
         // 2. User manually overrode AI prediction (.manualOverride)
@@ -159,6 +162,11 @@ class AutoExposureCoordinator: NSObject {
 
     /// Trigger startup inference if ready
     private func triggerStartupInferenceIfReady() {
+        // Respect the user's "Auto-adjust exposure on launch" setting (Settings app).
+        // When off, we leave the camera in iOS auto-exposure; manual long-press inference
+        // (triggerManualInference) is unaffected.
+        guard UserDefaults.standard.bool(forKey: "autoExposureOnLaunch") else { return }
+
         guard let manager = autoExposureManager,
               !hasTriggeredStartupInference,
               cameraService.status == .configured else {

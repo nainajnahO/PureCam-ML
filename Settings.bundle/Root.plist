@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PreferenceSpecifiers</key>
+	<array>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>Title</key>
+			<string>Viewfinder</string>
+			<key>FooterText</key>
+			<string>Shows a small indicator in the top-right corner outlining the saved photo's bounds and the viewfinder's coverage within them.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Show Framing Indicator</string>
+			<key>Key</key>
+			<string>showFramingIndicator</string>
+			<key>DefaultValue</key>
+			<true/>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>Title</key>
+			<string>AI Auto-Exposure</string>
+			<key>FooterText</key>
+			<string>Automatically runs the on-device AI to set ISO and shutter speed each time the app opens. You can still trigger it manually with a long press on the preview button.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Auto-adjust exposure on launch</string>
+			<key>Key</key>
+			<string>autoExposureOnLaunch</string>
+			<key>DefaultValue</key>
+			<true/>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>FooterText</key>
+			<string>Saves each photo's scene and your chosen exposure as a training sample to improve the AI over time. All data stays on your device.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Contribute to on-device AI training</string>
+			<key>Key</key>
+			<string>contributeTrainingData</string>
+			<key>DefaultValue</key>
+			<true/>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>FooterText</key>
+			<string>The maximum number of recent training samples kept on device. Once the limit is reached, the oldest samples are discarded first.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Title</key>
+			<string>Max training samples</string>
+			<key>Key</key>
+			<string>maxTrainingSamples</string>
+			<key>DefaultValue</key>
+			<integer>500</integer>
+			<key>Titles</key>
+			<array>
+				<string>100</string>
+				<string>250</string>
+				<string>500</string>
+				<string>750</string>
+				<string>1000</string>
+				<string>2000</string>
+			</array>
+			<key>Values</key>
+			<array>
+				<integer>100</integer>
+				<integer>250</integer>
+				<integer>500</integer>
+				<integer>750</integer>
+				<integer>1000</integer>
+				<integer>2000</integer>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

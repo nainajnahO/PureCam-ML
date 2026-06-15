@@ -60,14 +60,15 @@ struct TrainingDataset: Codable {
     }
 
     /// Add a new training sample
-    /// Maintains FIFO queue with max 500 samples
-    mutating func addSample(_ sample: TrainingSample) {
+    /// Maintains a FIFO queue capped at `maxSamples` (configurable via the Settings app;
+    /// defaults to 500 to preserve previous behavior when called without a value).
+    mutating func addSample(_ sample: TrainingSample, maxSamples: Int = 500) {
         samples.append(sample)
         lastUpdated = Date()
 
-        // FIFO: Keep only last 500 samples
-        if samples.count > 500 {
-            samples.removeFirst(samples.count - 500)
+        // FIFO: keep only the most recent `maxSamples` samples.
+        if samples.count > maxSamples {
+            samples.removeFirst(samples.count - maxSamples)
         }
     }
 

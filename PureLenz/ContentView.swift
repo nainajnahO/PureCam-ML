@@ -25,6 +25,11 @@ struct ContentView: View {
     /// Tracks app lifecycle (active, background, inactive) for camera session management.
     @Environment(\.scenePhase) private var scenePhase
 
+    /// User preference (Settings app → Show Framing Indicator). Backed by UserDefaults;
+    /// @AppStorage re-reads when the app returns to the foreground, so flipping it in
+    /// Settings takes effect on return. Default matches the registered default.
+    @AppStorage("showFramingIndicator") private var showFramingIndicator = true
+
     // MARK: - View Body
 
     var body: some View {
@@ -80,16 +85,18 @@ struct ContentView: View {
         // viewfinder's coverage within them (yellow). Aligned to the safe-area
         // top-trailing corner so it clears the Dynamic Island.
         .overlay(alignment: .topTrailing) {
-            FramingIndicator(
-                cameraService: scene.cameraService,
-                cameraVM: scene.cameraVM,
-                onTap: {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    scene.cameraVM.toggleFramingPreview()
-                }
-            )
-            .padding(.trailing, 20)
-            .padding(.top, 8)
+            if showFramingIndicator {
+                FramingIndicator(
+                    cameraService: scene.cameraService,
+                    cameraVM: scene.cameraVM,
+                    onTap: {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        scene.cameraVM.toggleFramingPreview()
+                    }
+                )
+                .padding(.trailing, 20)
+                .padding(.top, 8)
+            }
         }
 
         // Start/stop the camera and haptics as the app moves between foreground
