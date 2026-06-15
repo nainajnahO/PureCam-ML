@@ -106,6 +106,9 @@ class AutoExposureCoordinator: NSObject {
     /// the feature extraction both live in `AutoExposureManager`; this method
     /// only supplies the frame.
     func recordTrainingSampleIfNeeded() {
+        // Respect the user's "Contribute to on-device AI training" setting (Settings app).
+        guard UserDefaults.standard.bool(forKey: "contributeTrainingData") else { return }
+
         guard autoExposureManager.wantsTrainingSample else { return }
 
         Task { [weak self] in
@@ -142,6 +145,11 @@ class AutoExposureCoordinator: NSObject {
 
     /// Trigger startup inference if ready
     private func triggerStartupInferenceIfReady() {
+        // Respect the user's "Auto-adjust exposure on launch" setting (Settings app).
+        // When off, we leave the camera in iOS auto-exposure; manual long-press inference
+        // (triggerManualInference) is unaffected.
+        guard UserDefaults.standard.bool(forKey: "autoExposureOnLaunch") else { return }
+
         guard cameraService.status == .configured else { return }
 
         Task { [weak self] in
