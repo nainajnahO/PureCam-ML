@@ -117,7 +117,7 @@ class ModelTrainer {
         // Prepare training data
         print("Step 1: Preparing training data...")
         let (features, targets) = prepareTrainingData()
-        print("Prepared \(features.count) samples with \(features[0].count) features each")
+        print("Prepared \(features.count) samples")
 
         // SEQUENTIAL PREDICTION: Two-stage model training
 
@@ -176,9 +176,8 @@ class ModelTrainer {
 
         // Copy compiled models to documents directory
         print("Step 8: Installing models...")
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let finalISOURL = documentsPath.appendingPathComponent("ISORegressorV2.mlmodelc")
-        let finalShutterURL = documentsPath.appendingPathComponent("ShutterRegressorV2.mlmodelc")
+        let finalISOURL = MLModelFiles.isoModelURL
+        let finalShutterURL = MLModelFiles.shutterModelURL
 
         // Remove old models if they exist
         try? FileManager.default.removeItem(at: finalISOURL)
@@ -193,34 +192,11 @@ class ModelTrainer {
     }
 
     /// Prepare training data from samples
-    private func prepareTrainingData() -> (features: [[Float]], targets: [(Float, Double)]) {
+    private func prepareTrainingData() -> (features: [SceneFeatures], targets: [(Float, Double)]) {
         let samples = dataManager.dataset.samples
-
-        var features: [[Float]] = []
-        var targets: [(Float, Double)] = []
-
-        for sample in samples {
-            let f = sample.features
-            features.append([
-                f.meanLuminance,
-                f.medianLuminance,
-                f.minLuminance,
-                f.maxLuminance,
-                f.stdDevLuminance,
-                f.shadowsPercent,
-                f.midtonesPercent,
-                f.highlightsPercent,
-                f.clippedHighlightsPercent,
-                f.clippedShadowsPercent,
-                f.colorTemperature,
-                f.saturation,
-                f.centerWeightedLuminance,
-                f.sceneLightLevel
-            ])
-
-            targets.append((sample.userChosenISO, sample.userChosenShutterSeconds))
-        }
-
-        return (features, targets)
+        return (
+            samples.map(\.features),
+            samples.map { ($0.userChosenISO, $0.userChosenShutterSeconds) }
+        )
     }
 }

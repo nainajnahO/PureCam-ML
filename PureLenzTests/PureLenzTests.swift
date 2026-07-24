@@ -127,9 +127,24 @@ struct SceneLightLevelTests {
 
 @Suite("DataFrameBuilder log-space targets")
 struct DataFrameBuilderTests {
-    // 14 features: 13 scene stats + sceneLightLevel.
-    private let features: [[Float]] = [
-        [0.5, 0.5, 0.0, 1.0, 0.2, 0.2, 0.6, 0.2, 0.01, 0.01, 5500, 0.3, 0.5, 3.3]
+    private let features = [
+        SceneFeatures(
+            meanLuminance: 0.5,
+            medianLuminance: 0.5,
+            minLuminance: 0.0,
+            maxLuminance: 1.0,
+            stdDevLuminance: 0.2,
+            shadowsPercent: 0.2,
+            midtonesPercent: 0.6,
+            highlightsPercent: 0.2,
+            clippedHighlightsPercent: 0.01,
+            clippedShadowsPercent: 0.01,
+            colorTemperature: 5500,
+            saturation: 0.3,
+            centerWeightedLuminance: 0.5,
+            sceneLightLevel: 3.3,
+            timestamp: Date()
+        )
     ]
 
     @Test("ISO DataFrame stores targets as log2 and includes sceneLightLevel")

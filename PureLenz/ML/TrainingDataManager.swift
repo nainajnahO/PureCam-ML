@@ -26,8 +26,15 @@ class TrainingDataManager {
     // MARK: - Initialization
 
     init() {
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        self.fileURL = documentsPath.appendingPathComponent("trainingData.json")
+        self.fileURL = URL.documentsDirectory.appendingPathComponent("trainingDataV2.json")
+
+        // V1 samples lack sceneLightLevel and carry potentially stale exposure
+        // labels, so they can't train the V2 models — delete the old dataset
+        // and start recording fresh.
+        try? FileManager.default.removeItem(
+            at: URL.documentsDirectory.appendingPathComponent("trainingData.json")
+        )
+
         self.dataset = Self.loadDataset(from: fileURL) ?? TrainingDataset()
 
         print("TrainingDataManager initialized with \(dataset.samples.count) existing samples")
@@ -76,8 +83,6 @@ class TrainingDataManager {
             print("Loaded \(dataset.samples.count) training samples")
             return dataset
         } catch {
-            // Also the intended path for pre-sceneLightLevel datasets: the field
-            // is required, so old data fails decode and recording starts fresh.
             print("Failed to load training data: \(error)")
             return nil
         }

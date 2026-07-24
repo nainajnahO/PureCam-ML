@@ -544,14 +544,16 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
         // The exposure this exact frame was captured with, from the ISP's EXIF
         // attachment. The cached currentISO/currentShutterSpeed can't be used
         // here: they go stale whenever the device is in continuous auto-exposure.
+        // NSDictionary keeps the CFDictionary toll-free bridged — casting to
+        // [String: Any] would eagerly bridge every EXIF key just to read two.
         var frameISO: Float = 0
         var frameShutter: Double = 0
         if let exif = CMGetAttachment(sampleBuffer,
                                       key: kCGImagePropertyExifDictionary,
-                                      attachmentModeOut: nil) as? [String: Any] {
-            frameISO = (exif[kCGImagePropertyExifISOSpeedRatings as String] as? [NSNumber])?
+                                      attachmentModeOut: nil) as? NSDictionary {
+            frameISO = (exif[kCGImagePropertyExifISOSpeedRatings] as? [NSNumber])?
                 .first?.floatValue ?? 0
-            frameShutter = (exif[kCGImagePropertyExifExposureTime as String] as? NSNumber)?
+            frameShutter = (exif[kCGImagePropertyExifExposureTime] as? NSNumber)?
                 .doubleValue ?? 0
         }
         if frameISO <= 0 || frameShutter <= 0,

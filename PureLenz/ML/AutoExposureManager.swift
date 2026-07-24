@@ -18,6 +18,7 @@ import CoreML
 import SwiftUI
 import Observation
 import UIKit
+import OSLog
 
 @Observable
 class AutoExposureManager {
@@ -58,6 +59,9 @@ class AutoExposureManager {
 
     init(dataManager: TrainingDataManager) {
         self.dataManager = dataManager
+        // One-time migration before the first load; V1 files never reappear,
+        // so the reloads after each training run skip this.
+        removeLegacyV1Models()
         loadModel()
 
         // Reload the model whenever a training run finishes successfully.
@@ -82,13 +86,8 @@ class AutoExposureManager {
         // The battery observer only fires on state *changes*, so a launch that
         // happens while already on the charger would otherwise wait for the
         // next plug-in (or a capture while charging) before training. Check
-        // the current state once.
-        switch state {
-        case .disabled, .error:
-            checkAndTriggerTrainingIfNeeded()
-        default:
-            break
-        }
+        // once now; the callee guards charging, sample count, and single-flight.
+        checkAndTriggerTrainingIfNeeded()
     }
 
     deinit {
@@ -99,10 +98,8 @@ class AutoExposureManager {
     // MARK: - Model Management
 
     private func loadModel() {
-        removeLegacyV1Models()
-
-        let isoURL = getISOModelURL()
-        let shutterURL = getShutterModelURL()
+        let isoURL = MLModelFiles.isoModelURL
+        let shutterURL = MLModelFiles.shutterModelURL
 
         // Check if both models exist
         guard FileManager.default.fileExists(atPath: isoURL.path),
@@ -152,43 +149,12 @@ class AutoExposureManager {
             return nil
         }
 
-        state = .inferring
+        guard let prediction = performInference(
+            from: frame, isoModel: isoModel, shutterModel: shutterModel, label: "Sequential"
+        ) else { return nil }
 
-        let startTime = Date()
-
-        // 1. Extract features
-        guard let features = featureExtractor.extract(
-            from: frame.image,
-            frameISO: frame.iso,
-            frameShutterSeconds: frame.shutterSeconds
-        ) else {
-            state = .error("Feature extraction failed")
-            return nil
-        }
-
-        // 2. SEQUENTIAL PREDICTION
-        do {
-            let prediction = try predictExposure(
-                features: features,
-                isoModel: isoModel,
-                shutterModel: shutterModel
-            )
-
-            let elapsed = Date().timeIntervalSince(startTime) * 1000
-            print("Sequential ML inference completed in \(String(format: "%.1f", elapsed))ms")
-            print("     ISO: \(Int(prediction.iso))")
-            print("     Shutter: 1/\(Int(1.0/prediction.shutterSeconds))")
-
-            hasRunStartupInference = true
-            state = .applied
-
-            return prediction
-
-        } catch {
-            state = .error("Inference failed: \(error.localizedDescription)")
-            print("Inference error: \(error)")
-            return nil
-        }
+        hasRunStartupInference = true
+        return prediction
     }
 
     /// Run ML inference manually (triggered by user action like long press)
@@ -217,6 +183,20 @@ class AutoExposureManager {
             break // .ready, .applied, .manualOverride are all valid
         }
 
+        return performInference(
+            from: frame, isoModel: isoModel, shutterModel: shutterModel, label: "Manual"
+        )
+    }
+
+    /// Shared body of startup and manual inference: extract features, run the
+    /// two-stage prediction, and drive the `state` transitions. `label`
+    /// prefixes the log lines.
+    private func performInference(
+        from frame: CameraService.CapturedFrame,
+        isoModel: MLModel,
+        shutterModel: MLModel,
+        label: String
+    ) -> (iso: Float, shutterSeconds: Double)? {
         state = .inferring
         let startTime = Date()
 
@@ -230,7 +210,7 @@ class AutoExposureManager {
             return nil
         }
 
-        // 2. SEQUENTIAL PREDICTION (same as startup inference)
+        // 2. SEQUENTIAL PREDICTION
         do {
             let prediction = try predictExposure(
                 features: features,
@@ -239,28 +219,24 @@ class AutoExposureManager {
             )
 
             let elapsed = Date().timeIntervalSince(startTime) * 1000
-            print("Manual ML inference completed in \(String(format: "%.1f", elapsed))ms")
+            print("\(label) ML inference completed in \(String(format: "%.1f", elapsed))ms")
             print("     ISO: \(Int(prediction.iso))")
             print("     Shutter: 1/\(Int(1.0/prediction.shutterSeconds))")
 
             state = .applied
-
             return prediction
 
         } catch {
             state = .error("Inference failed: \(error.localizedDescription)")
-            print("Manual inference error: \(error)")
+            print("\(label) inference error: \(error)")
             return nil
         }
     }
 
-    /// Two-stage prediction shared by startup and manual inference: ISO from
-    /// scene features, then shutter from scene features + the predicted ISO.
-    ///
-    /// Both models are trained in log2 (stops) space — see DataFrameBuilder —
-    /// so a 1-stop error costs the same at ISO 50 as at ISO 3200. Outputs are
-    /// exponentiated back to raw ISO / seconds here, and the raw log2 ISO is
-    /// what the shutter model receives as its `chosenLogISO` input.
+    /// Two-stage prediction: ISO from scene features, then shutter from scene
+    /// features + the predicted ISO (as `chosenLogISO`). Both models predict
+    /// in log2 (stops) space — see DataFrameBuilder for why — so outputs are
+    /// exponentiated back to raw ISO / seconds here.
     private func predictExposure(
         features: SceneFeatures,
         isoModel: MLModel,
@@ -377,26 +353,13 @@ class AutoExposureManager {
 
     // MARK: - Utilities
 
-    private func getISOModelURL() -> URL {
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return documentsPath.appendingPathComponent("ISORegressorV2.mlmodelc")
-    }
-
-    private func getShutterModelURL() -> URL {
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return documentsPath.appendingPathComponent("ShutterRegressorV2.mlmodelc")
-    }
-
     /// Delete V1 models (raw-linear target schema). Their output columns don't
     /// match the log2-space readers, so they must never be loaded; V2 models
     /// train from freshly recorded samples (the old dataset is discarded too).
     private func removeLegacyV1Models() {
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        for legacyName in ["ISORegressor.mlmodelc", "ShutterRegressor.mlmodelc"] {
-            let url = documentsPath.appendingPathComponent(legacyName)
-            if FileManager.default.fileExists(atPath: url.path) {
-                try? FileManager.default.removeItem(at: url)
-                print("Removed legacy V1 model \(legacyName)")
+        for url in MLModelFiles.legacyModelURLs {
+            if (try? FileManager.default.removeItem(at: url)) != nil {
+                Logger.ml.info("Removed legacy V1 model \(url.lastPathComponent)")
             }
         }
     }
