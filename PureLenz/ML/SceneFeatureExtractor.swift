@@ -40,6 +40,13 @@ class SceneFeatureExtractor {
     ///   - frameShutterSeconds: Exposure duration the frame was captured with
     /// - Returns: SceneFeatures if successful, nil otherwise
     func extract(from ciImage: CIImage, frameISO: Float, frameShutterSeconds: Double) -> SceneFeatures? {
+        // A frame with unknown exposure can't be normalized into an absolute
+        // scene light level — better no features than a wildly wrong value.
+        guard frameISO > 0, frameShutterSeconds > 0 else {
+            Logger.ml.error("Rejecting frame with non-positive exposure (ISO \(frameISO), shutter \(frameShutterSeconds)s)")
+            return nil
+        }
+
         let startTime = Date()
 
         // 1. Downsample image

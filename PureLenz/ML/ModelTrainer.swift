@@ -35,7 +35,6 @@ class ModelTrainer {
         case alreadyRunning
     }
 
-    private let modelURL: URL
     private let dataManager: TrainingDataManager
 
     // Shared single-flight guard across the foreground + background training paths.
@@ -49,8 +48,7 @@ class ModelTrainer {
         return _isTraining
     }
 
-    init(modelURL: URL, dataManager: TrainingDataManager) {
-        self.modelURL = modelURL
+    init(dataManager: TrainingDataManager) {
         self.dataManager = dataManager
     }
 
@@ -185,7 +183,6 @@ class ModelTrainer {
         // Remove old models if they exist
         try? FileManager.default.removeItem(at: finalISOURL)
         try? FileManager.default.removeItem(at: finalShutterURL)
-        try? FileManager.default.removeItem(at: modelURL)  // Remove old combined model
 
         try FileManager.default.copyItem(at: compiledISOURL, to: finalISOURL)
         try FileManager.default.copyItem(at: compiledShutterURL, to: finalShutterURL)
@@ -218,9 +215,12 @@ class ModelTrainer {
                 f.colorTemperature,
                 f.saturation,
                 f.centerWeightedLuminance,
-                // Samples recorded before sceneLightLevel existed lack it, but
-                // their frames were exposed at the label settings, so it can be
-                // recovered exactly from the sample's own labels.
+                // Samples recorded before sceneLightLevel existed lack it, so
+                // recompute it from the sample's labels. Exact for captures shot
+                // at dialed-in settings; for legacy continuous-AE captures the
+                // label itself was a stale snapshot, so this stays consistent
+                // with the label rather than the true scene light — no worse
+                // than the sample already was.
                 f.sceneLightLevel ?? SceneFeatures.computeSceneLightLevel(
                     meanLuminance: f.meanLuminance,
                     iso: sample.userChosenISO,

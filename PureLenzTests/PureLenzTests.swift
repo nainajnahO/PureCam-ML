@@ -8,6 +8,7 @@
 
 import Testing
 import SwiftUI
+import CoreImage
 import TabularData
 @testable import PureLenz
 
@@ -147,5 +148,17 @@ struct DataFrameBuilderTests {
         )
         #expect(df["chosenLogISO", Double.self][0] == 6.0)    // log2(64)
         #expect(df["targetLogShutter", Double.self][0] == -8.0)  // log2(1/256)
+    }
+}
+
+@Suite("SceneFeatureExtractor exposure guard")
+struct SceneFeatureExtractorGuardTests {
+    @Test("rejects frames with unknown exposure instead of fabricating scene light")
+    func rejectsNonPositiveExposure() {
+        let image = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64))
+        let extractor = SceneFeatureExtractor()
+        #expect(extractor.extract(from: image, frameISO: 0, frameShutterSeconds: 1.0 / 60.0) == nil)
+        #expect(extractor.extract(from: image, frameISO: 100, frameShutterSeconds: 0) == nil)
     }
 }

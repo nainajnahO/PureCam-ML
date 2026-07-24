@@ -122,10 +122,18 @@ class AutoExposureCoordinator: NSObject {
                 frameISO: frame.iso,
                 frameShutterSeconds: frame.shutterSeconds
             ) {
+                // Label with the exposure the frame was actually captured at, not
+                // the cached currentISO/currentShutterSpeed: in continuous auto-
+                // exposure (.disabled/.error before any knob touch) the cache is
+                // a stale launch-time snapshot, which would pair a correct
+                // sceneLightLevel with a wrong target. The frame's own exposure
+                // keeps feature and label consistent by construction — in custom
+                // mode it equals the dialed-in settings, and in auto mode it is
+                // the AE choice the user accepted by taking the shot.
                 manager.recordTrainingSample(
                     features: features,
-                    iso: self.cameraService.currentISO,
-                    shutterSeconds: self.cameraService.currentShutterSpeed
+                    iso: frame.iso,
+                    shutterSeconds: frame.shutterSeconds
                 )
             }
         }

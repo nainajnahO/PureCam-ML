@@ -78,6 +78,17 @@ class AutoExposureManager {
         ) { [weak self] _ in
             self?.handleBatteryStateChange()
         }
+
+        // The battery observer only fires on state *changes*, so a launch while
+        // already on the charger would otherwise wait a full charge cycle for
+        // its retrain — exactly the state the V1→V2 migration leaves behind
+        // (models deleted, dataset ready). Check the current state once.
+        switch state {
+        case .disabled, .error:
+            checkAndTriggerTrainingIfNeeded()
+        default:
+            break
+        }
     }
 
     deinit {
@@ -347,7 +358,7 @@ class AutoExposureManager {
         let sampleCount = dataManager.dataset.samples.count
         print("Starting training: device charging + \(sampleCount) samples")
 
-        let trainer = ModelTrainer(modelURL: getModelURL(), dataManager: dataManager)
+        let trainer = ModelTrainer(dataManager: dataManager)
         trainer.train { _ in }
     }
 
@@ -388,11 +399,6 @@ class AutoExposureManager {
                 print("Removed legacy V1 model \(legacyName)")
             }
         }
-    }
-
-    // Legacy method for backwards compatibility
-    private func getModelURL() -> URL {
-        return getISOModelURL()
     }
 }
 
