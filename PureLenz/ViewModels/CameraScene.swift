@@ -32,20 +32,28 @@ final class CameraScene {
     let autoExposure: AutoExposureCoordinator
 
     init() {
-        // Build dependencies bottom-up so each view model gets fully-formed
-        // collaborators. Order matters: the coordinator depends on the
-        // exposure view model, so it is created last.
+        // Build dependencies bottom-up so each view model gets fully-formed,
+        // non-optional collaborators. Order matters: the coordinator depends on
+        // the exposure view model, so it is created last.
         let cameraService = CameraService()
         let haptics = HapticManager()
+        let autoExposureManager = AutoExposureManager(dataManager: TrainingDataManager())
         let cameraVM = CameraViewModel(cameraService: cameraService, hapticManager: haptics)
-        let exposureVM = ExposureControlViewModel(cameraService: cameraService, hapticManager: haptics)
-        let autoExposure = AutoExposureCoordinator(cameraService: cameraService, exposureControlVM: exposureVM)
+        let exposureVM = ExposureControlViewModel(
+            cameraService: cameraService,
+            hapticManager: haptics,
+            autoExposureManager: autoExposureManager
+        )
 
         self.cameraService = cameraService
         self.haptics = haptics
         self.cameraVM = cameraVM
         self.exposureVM = exposureVM
-        self.autoExposure = autoExposure
+        self.autoExposure = AutoExposureCoordinator(
+            cameraService: cameraService,
+            exposureControlVM: exposureVM,
+            autoExposureManager: autoExposureManager
+        )
 
         // Wire up capture callbacks once. Device orientation is owned by
         // CameraService, derived from its RotationCoordinator.
@@ -54,7 +62,7 @@ final class CameraScene {
 
     /// Forward app lifecycle changes to the view models that care about them.
     func handleScenePhaseChange(_ newPhase: ScenePhase) {
-        cameraVM.handleScenePhaseChange(newPhase, autoExposureManager: autoExposure.autoExposureManager)
+        cameraVM.handleScenePhaseChange(newPhase)
         autoExposure.handleScenePhaseChange(newPhase)
     }
 }

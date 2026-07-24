@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import Foundation
+import OSLog
 
 /// Manages persistence and retrieval of training data
 class TrainingDataManager {
@@ -36,8 +37,6 @@ class TrainingDataManager {
         )
 
         self.dataset = Self.loadDataset(from: fileURL) ?? TrainingDataset()
-
-        print("TrainingDataManager initialized with \(dataset.samples.count) existing samples")
     }
 
     // MARK: - Public Methods
@@ -46,14 +45,7 @@ class TrainingDataManager {
     func addSample(_ sample: TrainingSample) {
         dataset.addSample(sample)
         saveDataset()
-        print("Added training sample (\(dataset.samples.count) total)")
-    }
-
-    /// Clear all training data
-    func clearAllData() {
-        dataset = TrainingDataset()
-        saveDataset()
-        print("Cleared all training data")
+        Logger.ml.info("Added training sample (\(self.dataset.samples.count) total)")
     }
 
     // MARK: - Private Methods
@@ -65,13 +57,13 @@ class TrainingDataManager {
             let data = try encoder.encode(dataset)
             try data.write(to: fileURL, options: .atomic)
         } catch {
-            print("Failed to save training data: \(error)")
+            Logger.ml.error("Failed to save training data: \(error.localizedDescription)")
         }
     }
 
     private static func loadDataset(from url: URL) -> TrainingDataset? {
         guard FileManager.default.fileExists(atPath: url.path) else {
-            print("No existing training data found")
+            Logger.ml.info("No existing training data found")
             return nil
         }
 
@@ -80,10 +72,10 @@ class TrainingDataManager {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let dataset = try decoder.decode(TrainingDataset.self, from: data)
-            print("Loaded \(dataset.samples.count) training samples")
+            Logger.ml.info("Loaded \(dataset.samples.count) training samples")
             return dataset
         } catch {
-            print("Failed to load training data: \(error)")
+            Logger.ml.error("Failed to load training data: \(error.localizedDescription)")
             return nil
         }
     }

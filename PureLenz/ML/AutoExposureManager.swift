@@ -15,7 +15,6 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import CoreML
-import SwiftUI
 import Observation
 import UIKit
 import OSLog
@@ -54,14 +53,13 @@ class AutoExposureManager {
     private var shutterModel: MLModel?
     private let featureExtractor = SceneFeatureExtractor()
     private let dataManager: TrainingDataManager
+    private let trainer: ModelTrainer
 
     // MARK: - Initialization
 
     init(dataManager: TrainingDataManager) {
         self.dataManager = dataManager
-        // One-time migration before the first load; V1 files never reappear,
-        // so the reloads after each training run skip this.
-        removeLegacyV1Models()
+        self.trainer = ModelTrainer(dataManager: dataManager)
         loadModel()
 
         // Reload the model whenever a training run finishes successfully.
@@ -70,7 +68,7 @@ class AutoExposureManager {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.reloadModel()
+            self?.loadModel()
         }
 
         // Listen for battery charging state changes
@@ -97,37 +95,46 @@ class AutoExposureManager {
 
     // MARK: - Model Management
 
+    /// Load (or reload) both compiled models. The file checks and MLModel
+    /// loading run on a background queue — at launch this keeps the first
+    /// frame from waiting on disk I/O — and the result is applied back on
+    /// main. Until it lands, `state` stays `.disabled` and inference reports
+    /// not ready (the startup-inference path falls back to iOS auto).
     private func loadModel() {
-        let isoURL = MLModelFiles.isoModelURL
-        let shutterURL = MLModelFiles.shutterModelURL
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // V1 migration; a cheap no-op on every load after the first, since
+            // the files never reappear.
+            Self.removeLegacyV1Models()
 
-        // Check if both models exist
-        guard FileManager.default.fileExists(atPath: isoURL.path),
-              FileManager.default.fileExists(atPath: shutterURL.path) else {
-            // No models yet, wait for training
-            state = .disabled
-            print("No ML models found - will use iOS auto until trained")
-            return
+            let newState: State
+            var models: (iso: MLModel, shutter: MLModel)?
+            if FileManager.default.fileExists(atPath: MLModelFiles.isoModelURL.path),
+               FileManager.default.fileExists(atPath: MLModelFiles.shutterModelURL.path) {
+                do {
+                    let config = MLModelConfiguration()
+                    config.computeUnits = .cpuAndNeuralEngine
+                    models = (
+                        iso: try MLModel(contentsOf: MLModelFiles.isoModelURL, configuration: config),
+                        shutter: try MLModel(contentsOf: MLModelFiles.shutterModelURL, configuration: config)
+                    )
+                    newState = .ready
+                    Logger.ml.info("Both ML models loaded successfully (sequential prediction)")
+                } catch {
+                    newState = .error("Failed to load models: \(error.localizedDescription)")
+                    Logger.ml.error("Model load error: \(error.localizedDescription)")
+                }
+            } else {
+                newState = .disabled
+                Logger.ml.info("No ML models found - will use iOS auto until trained")
+            }
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isoModel = models?.iso
+                self.shutterModel = models?.shutter
+                self.state = newState
+            }
         }
-
-        do {
-            let config = MLModelConfiguration()
-            config.computeUnits = .cpuAndNeuralEngine
-
-            isoModel = try MLModel(contentsOf: isoURL, configuration: config)
-            shutterModel = try MLModel(contentsOf: shutterURL, configuration: config)
-
-            state = .ready
-            print("Both ML models loaded successfully (sequential prediction)")
-        } catch {
-            state = .error("Failed to load models: \(error.localizedDescription)")
-            print("Model load error: \(error)")
-        }
-    }
-
-    func reloadModel() {
-        print("Reloading ML model...")
-        loadModel()
     }
 
     // MARK: - Startup Inference
@@ -138,14 +145,14 @@ class AutoExposureManager {
     /// - Returns: (iso, shutterSeconds) if successful, nil otherwise
     func runStartupInference(from frame: CameraService.CapturedFrame) -> (iso: Float, shutterSeconds: Double)? {
         guard !hasRunStartupInference else {
-            print("Startup inference already completed")
+            Logger.ml.debug("Startup inference already completed")
             return nil
         }
 
         guard case .ready = state,
               let isoModel = isoModel,
               let shutterModel = shutterModel else {
-            print("Models not ready for inference (state: \(state))")
+            Logger.ml.debug("Models not ready for inference")
             return nil
         }
 
@@ -164,20 +171,20 @@ class AutoExposureManager {
     func runManualInference(from frame: CameraService.CapturedFrame) -> (iso: Float, shutterSeconds: Double)? {
         guard let isoModel = isoModel,
               let shutterModel = shutterModel else {
-            print("Models not available for manual inference (state: \(state))")
+            Logger.ml.debug("Models not available for manual inference")
             return nil
         }
 
         // Allow manual inference unless disabled or already inferring
         switch state {
         case .disabled:
-            print("Cannot run inference - no models trained yet")
+            Logger.ml.debug("Cannot run inference - no models trained yet")
             return nil
         case .error(let message):
-            print("Cannot run inference - error state: \(message)")
+            Logger.ml.error("Cannot run inference - error state: \(message)")
             return nil
         case .inferring:
-            print("Inference already in progress")
+            Logger.ml.debug("Inference already in progress")
             return nil
         default:
             break // .ready, .applied, .manualOverride are all valid
@@ -219,16 +226,17 @@ class AutoExposureManager {
             )
 
             let elapsed = Date().timeIntervalSince(startTime) * 1000
-            print("\(label) ML inference completed in \(String(format: "%.1f", elapsed))ms")
-            print("     ISO: \(Int(prediction.iso))")
-            print("     Shutter: 1/\(Int(1.0/prediction.shutterSeconds))")
+            Logger.ml.info("""
+                \(label) ML inference completed in \(String(format: "%.1f", elapsed))ms: \
+                ISO \(Int(prediction.iso)), shutter 1/\(Int(1.0 / prediction.shutterSeconds))
+                """)
 
             state = .applied
             return prediction
 
         } catch {
             state = .error("Inference failed: \(error.localizedDescription)")
-            print("\(label) inference error: \(error)")
+            Logger.ml.error("\(label) inference error: \(error.localizedDescription)")
             return nil
         }
     }
@@ -272,10 +280,10 @@ class AutoExposureManager {
     func notifyManualOverride() {
         guard state == .applied else { return }
         state = .manualOverride
-        print("AI disabled due to manual override")
+        Logger.ml.info("AI disabled due to manual override")
     }
 
-    /// Reset for next session (called on app restart)
+    /// Reset for next session (called by the coordinator on becoming active)
     func resetForNewSession() {
         hasRunStartupInference = false
         // Reset state to .ready if it was .applied or .manualOverride
@@ -288,11 +296,38 @@ class AutoExposureManager {
 
     // MARK: - Training Data Collection
 
-    /// Save training sample when user manually adjusts and captures
-    func recordTrainingSample(features: SceneFeatures, iso: Float, shutterSeconds: Double) {
-        let sample = TrainingSample(features: features, iso: iso, shutterSeconds: shutterSeconds)
-        dataManager.addSample(sample)
-        print("Recorded training sample (\(dataManager.dataset.samples.count) total)")
+    /// Whether a capture right now should be recorded as a training sample:
+    /// while collecting initial data (.disabled), after a manual override
+    /// (.manualOverride), or when the model failed (.error) and needs retraining.
+    var wantsTrainingSample: Bool {
+        switch state {
+        case .disabled, .manualOverride, .error:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Extract features from a captured frame and persist them as a training
+    /// sample, then trigger training if conditions allow. No-op unless
+    /// `wantsTrainingSample`.
+    func recordTrainingSampleIfNeeded(from frame: CameraService.CapturedFrame) {
+        guard wantsTrainingSample else { return }
+
+        guard let features = featureExtractor.extract(
+            from: frame.image,
+            frameISO: frame.iso,
+            frameShutterSeconds: frame.shutterSeconds
+        ) else { return }
+
+        // Label with the frame's own exposure, not the cached
+        // currentISO/currentShutterSpeed, which goes stale under continuous
+        // auto-exposure — see CameraService.CapturedFrame.
+        dataManager.addSample(TrainingSample(
+            features: features,
+            iso: frame.iso,
+            shutterSeconds: frame.shutterSeconds
+        ))
 
         // Check if we should train (only when charging)
         checkAndTriggerTrainingIfNeeded()
@@ -303,7 +338,6 @@ class AutoExposureManager {
         let batteryState = UIDevice.current.batteryState
 
         if batteryState == .charging || batteryState == .full {
-            print("Device is charging - checking if training needed")
             checkAndTriggerTrainingIfNeeded()
         }
     }
@@ -314,7 +348,7 @@ class AutoExposureManager {
         let batteryState = UIDevice.current.batteryState
         guard batteryState == .charging || batteryState == .full else {
             if dataManager.dataset.isReadyForTraining {
-                print("Ready to train (\(dataManager.dataset.samples.count) samples) but waiting for charging")
+                Logger.ml.debug("Ready to train (\(self.dataManager.dataset.samples.count) samples) but waiting for charging")
             }
             return
         }
@@ -324,31 +358,8 @@ class AutoExposureManager {
             return
         }
 
-        // Single-flight: the capture trigger and the battery-state trigger can fire
-        // close together — don't launch a second run on top of one already going.
-        guard !ModelTrainer.isCurrentlyTraining else {
-            print("Training already in progress — skipping")
-            return
-        }
-
-        let sampleCount = dataManager.dataset.samples.count
-        print("Starting training: device charging + \(sampleCount) samples")
-
-        let trainer = ModelTrainer(dataManager: dataManager)
-        trainer.train { _ in }
-    }
-
-    // MARK: - Rotation Angle Calculation (Inverse Mapping)
-    // NOTE: These methods delegate to ExposureCalculator for consistency
-
-    /// Calculate rotation angle from ISO value (inverse of CaptureButton's logarithmic mapping)
-    static func rotationAngleForISO(_ iso: Float, min: Float, max: Float) -> Angle {
-        return ExposureCalculator.angleFromISO(iso, min: min, max: max)
-    }
-
-    /// Calculate rotation angle from shutter speed (inverse of CaptureButton's logarithmic mapping)
-    static func rotationAngleForShutter(_ shutterSeconds: Double, min: Double, max: Double) -> Angle {
-        return ExposureCalculator.angleFromShutter(shutterSeconds, min: min, max: max)
+        Logger.ml.info("Starting training: device charging + \(self.dataManager.dataset.samples.count) samples")
+        trainer.train()
     }
 
     // MARK: - Utilities
@@ -356,7 +367,7 @@ class AutoExposureManager {
     /// Delete V1 models (raw-linear target schema). Their output columns don't
     /// match the log2-space readers, so they must never be loaded; V2 models
     /// train from freshly recorded samples (the old dataset is discarded too).
-    private func removeLegacyV1Models() {
+    private static func removeLegacyV1Models() {
         for url in MLModelFiles.legacyModelURLs {
             if (try? FileManager.default.removeItem(at: url)) != nil {
                 Logger.ml.info("Removed legacy V1 model \(url.lastPathComponent)")
@@ -369,5 +380,4 @@ class AutoExposureManager {
 
 extension Notification.Name {
     static let mlModelUpdated = Notification.Name("MLModelUpdated")
-    static let mlModelTrainingFailed = Notification.Name("MLModelTrainingFailed")
 }
