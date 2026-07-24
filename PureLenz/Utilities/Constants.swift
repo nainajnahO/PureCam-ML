@@ -25,6 +25,30 @@ enum CameraConstants {
     static let hardwareMaxShutter: Double = 1.0 / 2.0
 }
 
+/// On-device trained CoreML model files, shared by ModelTrainer (writer) and
+/// AutoExposureManager (reader) so the two can never disagree on names.
+/// The V2 suffix marks the log2-target schema; bumping the version means
+/// renaming here and moving the old names into `legacyModelURLs` so stale
+/// models are cleaned up at launch.
+enum MLModelFiles {
+    /// Compiled ISO regressor installed in the Documents directory.
+    static var isoModelURL: URL {
+        URL.documentsDirectory.appendingPathComponent("ISORegressorV2.mlmodelc")
+    }
+
+    /// Compiled shutter regressor installed in the Documents directory.
+    static var shutterModelURL: URL {
+        URL.documentsDirectory.appendingPathComponent("ShutterRegressorV2.mlmodelc")
+    }
+
+    /// Superseded model files (raw-linear V1 targets), deleted at launch.
+    static var legacyModelURLs: [URL] {
+        ["ISORegressor.mlmodelc", "ShutterRegressor.mlmodelc"].map {
+            URL.documentsDirectory.appendingPathComponent($0)
+        }
+    }
+}
+
 /// Perceptual luminance weights and tonal-range thresholds used by feature extraction.
 enum LuminanceConstants {
     /// Rec. 709 luma coefficient for the red channel.
@@ -47,6 +71,14 @@ enum LuminanceConstants {
 
     /// Upper bound of the midtones histogram bin (normalized luminance).
     static let midtonesUpperBound: Float = 0.75
+
+    /// Floor applied to mean luminance before taking log2 in the scene-light
+    /// computation, so an all-black frame stays finite.
+    static let sceneLightLuminanceFloor: Float = 1e-4
+
+    /// Floor applied to the ISO × shutter product before taking log2 in the
+    /// scene-light computation, so a degenerate exposure stays finite.
+    static let sceneLightExposureFloor: Double = 1e-9
 }
 
 /// Tuning constants for manual exposure gesture feedback.

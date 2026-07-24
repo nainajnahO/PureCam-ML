@@ -66,10 +66,31 @@ struct SceneFeatures: Codable {
     /// Center-weighted luminance (photography standard)
     let centerWeightedLuminance: Float
 
+    // MARK: - Scene Light
+
+    /// Exposure-normalized scene brightness in stops:
+    /// log2(meanLuminance) - log2(frameISO × frameShutterSeconds).
+    ///
+    /// The preview's luminance alone is ambiguous — a well-exposed sunny scene
+    /// and a well-exposed dim scene look the same — so this divides out the
+    /// exposure the frame was captured with to recover the absolute light level.
+    /// Datasets recorded before this feature existed are discarded by
+    /// TrainingDataManager's V2 filename migration.
+    let sceneLightLevel: Float
+
     // MARK: - Metadata
 
     /// When features were extracted
     let timestamp: Date
+
+    // MARK: - Scene Light Computation
+
+    /// Compute the exposure-normalized scene brightness in stops.
+    static func computeSceneLightLevel(meanLuminance: Float, iso: Float, shutterSeconds: Double) -> Float {
+        let luminance = max(meanLuminance, LuminanceConstants.sceneLightLuminanceFloor)
+        let exposure = max(Double(iso) * shutterSeconds, LuminanceConstants.sceneLightExposureFloor)
+        return log2(luminance) - Float(log2(exposure))
+    }
 
     // MARK: - ML Conversion
 
@@ -88,7 +109,8 @@ struct SceneFeatures: Codable {
             "clippedShadowsPercent": clippedShadowsPercent,
             "colorTemperature": colorTemperature,
             "saturation": saturation,
-            "centerWeightedLuminance": centerWeightedLuminance
+            "centerWeightedLuminance": centerWeightedLuminance,
+            "sceneLightLevel": sceneLightLevel
         ]
         return try MLDictionaryFeatureProvider(dictionary: dict)
     }

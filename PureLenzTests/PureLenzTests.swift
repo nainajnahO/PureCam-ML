@@ -8,6 +8,8 @@
 
 import Testing
 import SwiftUI
+import CoreImage
+import TabularData
 @testable import PureLenz
 
 @Suite("ExposureCalculator")
@@ -74,5 +76,104 @@ struct ExposureCalculatorTests {
         // Slower than the maximum → clamp to 360°
         let tooSlow = ExposureCalculator.angleFromShutter(2.0, min: min, max: max)
         #expect(tooSlow.degrees == 360)
+    }
+}
+
+@Suite("SceneLightLevel")
+struct SceneLightLevelTests {
+    @Test("computeSceneLightLevel matches the formula for known inputs")
+    func knownValue() {
+        // log2(0.5) - log2(50 * 1/1000) = -1 - log2(0.05) ≈ 3.3219
+        let value = SceneFeatures.computeSceneLightLevel(
+            meanLuminance: 0.5, iso: 50, shutterSeconds: 1.0 / 1000.0
+        )
+        #expect(abs(value - 3.3219) < 0.001)
+    }
+
+    @Test("separates a sunny scene from a dim scene even when previews look alike")
+    func separatesSunnyFromDim() {
+        // Both frames are well exposed (similar meanLuminance) — the situation
+        // where the other 13 features are blind. The exposure normalization
+        // must still tell them apart by many stops.
+        let sunny = SceneFeatures.computeSceneLightLevel(
+            meanLuminance: 0.48, iso: 50, shutterSeconds: 1.0 / 1250.0
+        )
+        let dim = SceneFeatures.computeSceneLightLevel(
+            meanLuminance: 0.44, iso: 640, shutterSeconds: 1.0 / 30.0
+        )
+        #expect(sunny - dim > 5)
+    }
+
+    @Test("equal previews at different exposures yield different scene light")
+    func normalizesByExposure() {
+        // Same preview brightness, 4x the exposure → exactly 2 stops less scene light.
+        let a = SceneFeatures.computeSceneLightLevel(
+            meanLuminance: 0.5, iso: 100, shutterSeconds: 1.0 / 100.0
+        )
+        let b = SceneFeatures.computeSceneLightLevel(
+            meanLuminance: 0.5, iso: 400, shutterSeconds: 1.0 / 100.0
+        )
+        #expect(abs((a - b) - 2) < 0.001)
+    }
+
+    @Test("stays finite for an all-black frame")
+    func blackFrameIsFinite() {
+        let value = SceneFeatures.computeSceneLightLevel(
+            meanLuminance: 0, iso: 6400, shutterSeconds: 0.5
+        )
+        #expect(value.isFinite)
+    }
+}
+
+@Suite("DataFrameBuilder log-space targets")
+struct DataFrameBuilderTests {
+    private let features = [
+        SceneFeatures(
+            meanLuminance: 0.5,
+            medianLuminance: 0.5,
+            minLuminance: 0.0,
+            maxLuminance: 1.0,
+            stdDevLuminance: 0.2,
+            shadowsPercent: 0.2,
+            midtonesPercent: 0.6,
+            highlightsPercent: 0.2,
+            clippedHighlightsPercent: 0.01,
+            clippedShadowsPercent: 0.01,
+            colorTemperature: 5500,
+            saturation: 0.3,
+            centerWeightedLuminance: 0.5,
+            sceneLightLevel: 3.3,
+            timestamp: Date()
+        )
+    ]
+
+    @Test("ISO DataFrame stores targets as log2 and includes sceneLightLevel")
+    func isoDataFrameUsesLogTargets() {
+        let df = DataFrameBuilder.createISODataFrame(features: features, isoTargets: [64])
+        #expect(df.columns.map(\.name).contains("sceneLightLevel"))
+        #expect(df["targetLogISO", Double.self][0] == 6.0)  // log2(64)
+    }
+
+    @Test("shutter DataFrame stores chosen ISO and target as log2")
+    func shutterDataFrameUsesLogTargets() {
+        let df = DataFrameBuilder.createShutterDataFrame(
+            features: features,
+            isoTargets: [64],
+            shutterTargets: [1.0 / 256.0]
+        )
+        #expect(df["chosenLogISO", Double.self][0] == 6.0)    // log2(64)
+        #expect(df["targetLogShutter", Double.self][0] == -8.0)  // log2(1/256)
+    }
+}
+
+@Suite("SceneFeatureExtractor exposure guard")
+struct SceneFeatureExtractorGuardTests {
+    @Test("rejects frames with unknown exposure instead of fabricating scene light")
+    func rejectsNonPositiveExposure() {
+        let image = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64))
+        let extractor = SceneFeatureExtractor()
+        #expect(extractor.extract(from: image, frameISO: 0, frameShutterSeconds: 1.0 / 60.0) == nil)
+        #expect(extractor.extract(from: image, frameISO: 100, frameShutterSeconds: 0) == nil)
     }
 }

@@ -117,11 +117,18 @@ class AutoExposureCoordinator: NSObject {
             guard let self,
                   let frame = await self.cameraService.captureNextFrame() else { return }
             let extractor = SceneFeatureExtractor()
-            if let features = extractor.extract(from: frame) {
+            if let features = extractor.extract(
+                from: frame.image,
+                frameISO: frame.iso,
+                frameShutterSeconds: frame.shutterSeconds
+            ) {
+                // Label with the frame's own exposure, not the cached
+                // currentISO/currentShutterSpeed, which goes stale under
+                // continuous auto-exposure — see CameraService.CapturedFrame.
                 manager.recordTrainingSample(
                     features: features,
-                    iso: self.cameraService.currentISO,
-                    shutterSeconds: self.cameraService.currentShutterSpeed
+                    iso: frame.iso,
+                    shutterSeconds: frame.shutterSeconds
                 )
             }
         }
