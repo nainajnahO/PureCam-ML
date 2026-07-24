@@ -9,6 +9,7 @@
 import Testing
 import SwiftUI
 import CoreImage
+import CoreML
 import TabularData
 @testable import PureLenz
 
@@ -50,24 +51,24 @@ struct ExposureCalculatorTests {
         #expect(abs(angle.degrees - expectedDegrees) < 0.1)
     }
 
-    @Test("shutterFromProgress clamps to camera hardware limits")
-    func shutterRespectsHardwareLimits() {
-        // Caller-supplied range is wider than hardware allows; output must stay within
-        // CameraConstants.hardwareMinShutter ... hardwareMaxShutter.
-        let aggressiveMin = 1.0 / 10_000.0  // faster than 1/4000
-        let aggressiveMax = 1.0              // slower than 1/2
+    @Test("shutterFromProgress maps the endpoints to the supplied range")
+    func shutterMapsEndpointsToRange() {
+        // The calculator is pure math over the range it is handed — the manual
+        // policy caps are applied upstream, in CameraService's configuration.
+        let min = CameraConstants.fastestManualShutter
+        let max = CameraConstants.slowestManualShutter
 
-        let fastest = ExposureCalculator.shutterFromProgress(0, min: aggressiveMin, max: aggressiveMax)
-        let slowest = ExposureCalculator.shutterFromProgress(1, min: aggressiveMin, max: aggressiveMax)
+        let fastest = ExposureCalculator.shutterFromProgress(0, min: min, max: max)
+        let slowest = ExposureCalculator.shutterFromProgress(1, min: min, max: max)
 
-        #expect(abs(fastest - CameraConstants.hardwareMinShutter) < 1e-6)
-        #expect(abs(slowest - CameraConstants.hardwareMaxShutter) < 1e-6)
+        #expect(abs(fastest - min) < 1e-9)
+        #expect(abs(slowest - max) < 1e-9)
     }
 
     @Test("angleFromShutter clamps to 0...360 for out-of-range shutter values")
     func angleFromShutterClampsToValidRange() {
-        let min = CameraConstants.hardwareMinShutter
-        let max = CameraConstants.hardwareMaxShutter
+        let min = CameraConstants.fastestManualShutter
+        let max = CameraConstants.slowestManualShutter
 
         // Faster than the minimum → clamp to 0°
         let tooFast = ExposureCalculator.angleFromShutter(1.0 / 8000.0, min: min, max: max)
@@ -127,42 +128,50 @@ struct SceneLightLevelTests {
 
 @Suite("DataFrameBuilder log-space targets")
 struct DataFrameBuilderTests {
-    private let features = [
-        SceneFeatures(
-            meanLuminance: 0.5,
-            medianLuminance: 0.5,
-            minLuminance: 0.0,
-            maxLuminance: 1.0,
-            stdDevLuminance: 0.2,
-            shadowsPercent: 0.2,
-            midtonesPercent: 0.6,
-            highlightsPercent: 0.2,
-            clippedHighlightsPercent: 0.01,
-            clippedShadowsPercent: 0.01,
-            colorTemperature: 5500,
-            saturation: 0.3,
-            centerWeightedLuminance: 0.5,
-            sceneLightLevel: 3.3,
-            timestamp: Date()
+    private let samples = [
+        TrainingSample(
+            features: SceneFeatures(
+                meanLuminance: 0.5,
+                medianLuminance: 0.5,
+                minLuminance: 0.0,
+                maxLuminance: 1.0,
+                stdDevLuminance: 0.2,
+                shadowsPercent: 0.2,
+                midtonesPercent: 0.6,
+                highlightsPercent: 0.2,
+                clippedHighlightsPercent: 0.01,
+                clippedShadowsPercent: 0.01,
+                colorTemperature: 5500,
+                saturation: 0.3,
+                centerWeightedLuminance: 0.5,
+                sceneLightLevel: 3.3,
+                timestamp: Date()
+            ),
+            iso: 64,
+            shutterSeconds: 1.0 / 256.0
         )
     ]
 
     @Test("ISO DataFrame stores targets as log2 and includes sceneLightLevel")
     func isoDataFrameUsesLogTargets() {
-        let df = DataFrameBuilder.createISODataFrame(features: features, isoTargets: [64])
+        let df = DataFrameBuilder.createISODataFrame(samples: samples)
         #expect(df.columns.map(\.name).contains("sceneLightLevel"))
         #expect(df["targetLogISO", Double.self][0] == 6.0)  // log2(64)
     }
 
     @Test("shutter DataFrame stores chosen ISO and target as log2")
     func shutterDataFrameUsesLogTargets() {
-        let df = DataFrameBuilder.createShutterDataFrame(
-            features: features,
-            isoTargets: [64],
-            shutterTargets: [1.0 / 256.0]
-        )
+        let df = DataFrameBuilder.createShutterDataFrame(samples: samples)
         #expect(df["chosenLogISO", Double.self][0] == 6.0)    // log2(64)
         #expect(df["targetLogShutter", Double.self][0] == -8.0)  // log2(1/256)
+    }
+
+    @Test("training columns and inference features come from one schema table")
+    func trainingColumnsMatchInferenceFeatures() throws {
+        let df = DataFrameBuilder.createISODataFrame(samples: samples)
+        let provider = try samples[0].features.toMLFeatureProvider()
+        let featureColumns = Set(df.columns.map(\.name)).subtracting(["targetLogISO"])
+        #expect(featureColumns == Set(provider.featureNames))
     }
 }
 

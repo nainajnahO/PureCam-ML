@@ -18,6 +18,10 @@ import SwiftUI
 
 /// Utility for logarithmic exposure calculations
 /// Consolidates forward and inverse mappings for ISO and shutter speed
+///
+/// Pure math over the range it is handed: callers pass CameraService's
+/// min/max values, which already have the manual-control policy caps applied
+/// at session configuration (see CameraConstants).
 enum ExposureCalculator {
     // MARK: - Forward Mapping (Progress → Value)
 
@@ -41,12 +45,8 @@ enum ExposureCalculator {
     ///   - max: Maximum shutter speed in seconds
     /// - Returns: Shutter speed in seconds
     static func shutterFromProgress(_ progress: Double, min: Double, max: Double) -> Double {
-        // Apply hardware limits
-        let minShutter = Swift.max(min, CameraConstants.hardwareMinShutter)
-        let maxShutter = Swift.min(max, CameraConstants.hardwareMaxShutter)
-
-        let logMin = log(minShutter)
-        let logMax = log(maxShutter)
+        let logMin = log(min)
+        let logMax = log(max)
         let logShutter = logMin + progress * (logMax - logMin)
         return exp(logShutter)
     }
@@ -82,12 +82,8 @@ enum ExposureCalculator {
     ///   - max: Maximum shutter speed in seconds
     /// - Returns: Rotation angle (0° = top, increases clockwise)
     static func angleFromShutter(_ shutterSeconds: Double, min: Double, max: Double) -> Angle {
-        // Apply hardware limits
-        let minShutter = Swift.max(min, CameraConstants.hardwareMinShutter)
-        let maxShutter = Swift.min(max, CameraConstants.hardwareMaxShutter)
-
-        let logMin = log(minShutter)
-        let logMax = log(maxShutter)
+        let logMin = log(min)
+        let logMax = log(max)
         let logShutter = log(shutterSeconds)
 
         let progress = (logShutter - logMin) / (logMax - logMin)

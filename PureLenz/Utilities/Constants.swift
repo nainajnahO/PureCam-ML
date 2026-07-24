@@ -16,13 +16,17 @@
 
 import Foundation
 
-/// Camera hardware limits shared across exposure math.
+/// Manual-exposure policy caps. Applied once, in CameraService's session
+/// configuration, on top of the device-reported exposure range — the clamped
+/// range is then the single source that the knob mapping, the AI ramp, and
+/// setCustomExposure all read.
 enum CameraConstants {
-    /// Fastest shutter speed supported by typical iPhone hardware (1/4000 s).
-    static let hardwareMinShutter: Double = 1.0 / 4000.0
+    /// Fastest shutter speed exposed to manual control (1/4000 s).
+    static let fastestManualShutter: Double = 1.0 / 4000.0
 
-    /// Slowest shutter speed exposed to manual control (1/2 s).
-    static let hardwareMaxShutter: Double = 1.0 / 2.0
+    /// Slowest shutter speed exposed to manual control (1/2 s) — a UX cap,
+    /// not a hardware limit; longer exposures aren't practical handheld.
+    static let slowestManualShutter: Double = 1.0 / 2.0
 }
 
 /// On-device trained CoreML model files, shared by ModelTrainer (writer) and

@@ -24,7 +24,6 @@ import ImageIO
 @Observable
 class CameraService: NSObject {
     var session = AVCaptureSession()
-    var isSessionRunning = false
 
     private let sessionQueue = DispatchQueue(label: "com.purelenz.sessionQueue")
     private let output = AVCapturePhotoOutput()
@@ -58,8 +57,9 @@ class CameraService: NSObject {
     // delivered sample buffer. All access is serialized on `videoOutputQueue`.
     private var pendingFrameRequests: [(id: UUID, continuation: CheckedContinuation<CapturedFrame?, Never>)] = []
 
-    // Callback for preview captures - delivers decoded UIImage
-    var onPreviewCaptured: ((UIImage) -> Void)?
+    // Callback for preview captures — delivers the decoded UIImage, or nil
+    // when the capture fails, so the caller can release its in-flight state.
+    var onPreviewCaptured: ((UIImage?) -> Void)?
     
     enum Status {
         case unconfigured
@@ -98,19 +98,21 @@ class CameraService: NSObject {
     var minShutterSpeed: Double = 0
     var maxShutterSpeed: Double = 0
 
-    // Discrete ISO values supported by iPhone cameras (1/3 stop increments)
-    static let supportedISOValues: [Float] = [
+    // Discrete ISO values in 1/3 stop increments; filtered to the active
+    // format's reported range at configuration time (see `isoDetents`).
+    private static let supportedISOValues: [Float] = [
         32, 40, 50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800,
         1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400
     ]
 
-    /// Rounds an arbitrary ISO value to the nearest supported discrete value
-    static func roundToNearestISO(_ value: Float) -> Float {
-        // Find the closest supported ISO value
-        guard let nearest = supportedISOValues.min(by: { abs($0 - value) < abs($1 - value) }) else {
-            return value
-        }
-        return nearest
+    /// The discrete ISO detents the manual control offers — the standard table
+    /// limited to what the active format actually supports, so the knob can
+    /// never land on a value `setCustomExposure` would have to clamp away.
+    private(set) var isoDetents: [Float] = CameraService.supportedISOValues
+
+    /// Rounds an arbitrary ISO value to the nearest supported detent
+    func roundToNearestISO(_ value: Float) -> Float {
+        isoDetents.min(by: { abs($0 - value) < abs($1 - value) }) ?? value
     }
 
     // Manual Exposure Controls
@@ -236,12 +238,26 @@ class CameraService: NSObject {
             
             camera.unlockForConfiguration()
             
-            // Capture initial exposure limits
+            // Capture the exposure limits: the device-reported range clamped to
+            // the app's manual-control policy caps (CameraConstants). This is
+            // the single home of the usable range — the knob mapping, the AI
+            // ramp, and setCustomExposure all read these same values, so the
+            // knob position and the applied exposure can never disagree.
             let activeFormat = camera.activeFormat
             self.minISO = activeFormat.minISO
             self.maxISO = activeFormat.maxISO
-            self.minShutterSpeed = activeFormat.minExposureDuration.seconds
-            self.maxShutterSpeed = activeFormat.maxExposureDuration.seconds
+            self.minShutterSpeed = max(
+                activeFormat.minExposureDuration.seconds, CameraConstants.fastestManualShutter
+            )
+            self.maxShutterSpeed = min(
+                activeFormat.maxExposureDuration.seconds, CameraConstants.slowestManualShutter
+            )
+            let detents = Self.supportedISOValues.filter {
+                $0 >= activeFormat.minISO && $0 <= activeFormat.maxISO
+            }
+            if !detents.isEmpty {
+                self.isoDetents = detents
+            }
             
             // Initialize current values
             self.currentISO = camera.iso
@@ -347,31 +363,29 @@ class CameraService: NSObject {
         sessionQueue.async {
             if !self.session.isRunning && !self.session.isInterrupted {
                 self.session.startRunning()
-                DispatchQueue.main.async {
-                    self.isSessionRunning = true
-                }
             }
         }
     }
-    
+
     func stopSession() {
         sessionQueue.async {
             if self.session.isRunning {
                 self.session.stopRunning()
-                DispatchQueue.main.async {
-                    self.isSessionRunning = false
-                }
             }
         }
     }
-    
+
     func capturePhoto(mode: CaptureMode = .save) {
-        guard session.isRunning else { return }
+        guard session.isRunning else {
+            reportPreviewFailure(mode: mode)
+            return
+        }
         currentCaptureMode = mode
 
         // Capture RAW only
         guard let rawFormat = output.availableRawPhotoPixelFormatTypes.first else {
             Logger.camera.error("RAW format not available")
+            reportPreviewFailure(mode: mode)
             return
         }
 
@@ -387,6 +401,13 @@ class CameraService: NSObject {
 
         let settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
         output.capturePhoto(with: settings, delegate: self)
+    }
+
+    /// Report a failed preview capture through `onPreviewCaptured` (nil image)
+    /// so the caller's in-flight state is always released. No-op for saves.
+    private func reportPreviewFailure(mode: CaptureMode) {
+        guard mode == .preview else { return }
+        DispatchQueue.main.async { self.onPreviewCaptured?(nil) }
     }
 
     /// Request the next camera frame for ML feature extraction, along with the
@@ -405,13 +426,11 @@ class CameraService: NSObject {
             // Timeout fallback so a request can never hang forever. Runs on the
             // same serial queue as the delegate, so the continuation is resumed
             // exactly once.
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
-                self?.videoOutputQueue.async {
-                    guard let self,
-                          let index = self.pendingFrameRequests.firstIndex(where: { $0.id == id }) else { return }
-                    let request = self.pendingFrameRequests.remove(at: index)
-                    request.continuation.resume(returning: nil)
-                }
+            videoOutputQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self,
+                      let index = self.pendingFrameRequests.firstIndex(where: { $0.id == id }) else { return }
+                let request = self.pendingFrameRequests.remove(at: index)
+                request.continuation.resume(returning: nil)
             }
         }
     }
@@ -483,9 +502,17 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput,
                      didFinishProcessingPhoto photo: AVCapturePhoto,
                      error: Error?) {
-        guard error == nil else { return }
+        // Reset to save mode for next capture
+        let mode = currentCaptureMode
+        currentCaptureMode = .save
 
-        switch currentCaptureMode {
+        if let error {
+            Logger.camera.error("Capture failed: \(error.localizedDescription)")
+            reportPreviewFailure(mode: mode)
+            return
+        }
+
+        switch mode {
         case .save:
             // Save pure RAW
             Logger.camera.debug("Saving pure RAW")
@@ -494,11 +521,13 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
 
         case .preview:
             // Preview RAW (no save)
-            guard let data = photo.fileDataRepresentation() else { return }
+            guard let data = photo.fileDataRepresentation() else {
+                reportPreviewFailure(mode: mode)
+                return
+            }
 
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let self = self,
-                      let ciImage = CIImage(data: data) else { return }
+                guard let self = self else { return }
 
                 // Apply the SAME fixed orientation the live preview layer uses
                 // (videoRotationAngle = 90°, i.e. .right / EXIF orientation 6). A
@@ -507,21 +536,21 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
                 // needs no UIDevice orientation and keeps working with rotation
                 // lock on, exactly like the live preview. The snapshot then matches
                 // the preview by construction.
-                let orientedImage = ciImage.oriented(.right)
+                var uiImage: UIImage?
+                if let ciImage = CIImage(data: data) {
+                    let orientedImage = ciImage.oriented(.right)
+                    if let cgImage = CIContext.shared.createCGImage(orientedImage, from: orientedImage.extent) {
+                        uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
+                    }
+                }
 
-                guard let cgImage = CIContext.shared.createCGImage(orientedImage, from: orientedImage.extent) else { return }
-
-                let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
-
-                // Deliver to main thread
+                // Deliver to main thread; nil reports a decode failure so the
+                // caller can release its in-flight state.
                 DispatchQueue.main.async {
                     self.onPreviewCaptured?(uiImage)
                 }
             }
         }
-
-        // Reset to save mode for next capture
-        currentCaptureMode = .save
     }
 }
 
