@@ -19,8 +19,8 @@ import SwiftUI
 struct CaptureButton: View {
     // `@Observable` references — read directly, no Bindings required.
     let exposureVM: ExposureControlViewModel
-    let cameraService: CameraService
     let autoExposure: AutoExposureCoordinator
+    let haptics: HapticManager
 
     let buttonSize: CGFloat
     let dotSize: CGFloat
@@ -65,7 +65,7 @@ struct CaptureButton: View {
         .frame(width: buttonSize, height: buttonSize)
         .contentShape(Circle())
         .onTapGesture {
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            haptics.impact(.medium)
             onCapture()
         }
         .highPriorityGesture(
@@ -81,16 +81,13 @@ struct CaptureButton: View {
     }
 
     private func handleDragChange(_ value: DragGesture.Value) {
-        // Notify AI manager of manual override (disables AI for session)
-        exposureVM.notifyAutoExposureManager(autoExposure.autoExposureManager)
-
         let buttonCenter = buttonSize / 2
 
         // Calculate distance from center
         let center = CGPoint(x: buttonCenter, y: buttonCenter)
         let dx = value.location.x - center.x
         let dy = value.location.y - center.y
-        let distance = sqrt(dx * dx + dy * dy)
+        let distance = hypot(dx, dy)
 
         // Detect zone
         let control: ExposureControl = distance < isoZoneRadius ? .iso : .shutter

@@ -23,11 +23,11 @@ struct ButtonUILayer: View {
     let cameraVM: CameraViewModel
     let exposureVM: ExposureControlViewModel
     let autoExposure: AutoExposureCoordinator
+    let haptics: HapticManager
 
     let sizes: ButtonSizes
     let positions: ButtonPositions
     let textPosition: CGPoint
-    let deviceOrientation: UIDeviceOrientation
 
     var body: some View {
         // Liquid Glass surfaces live in their own container (so they share a
@@ -54,8 +54,8 @@ struct ButtonUILayer: View {
             ZStack {
                 CaptureButton(
                     exposureVM: exposureVM,
-                    cameraService: cameraService,
                     autoExposure: autoExposure,
+                    haptics: haptics,
                     buttonSize: sizes.captureButtonSize,
                     dotSize: sizes.dotSize,
                     isoRingRadius: sizes.isoRingRadius,
@@ -73,7 +73,7 @@ struct ButtonUILayer: View {
                     activeControl: exposureVM.activeControl,
                     currentISO: cameraService.currentISO,
                     currentShutterSpeed: cameraService.currentShutterSpeed,
-                    deviceOrientation: deviceOrientation
+                    deviceOrientation: cameraService.deviceOrientation
                 )
                 .position(x: textPosition.x, y: textPosition.y)
             }
@@ -94,19 +94,19 @@ struct ButtonUILayer: View {
             .onLongPressGesture(minimumDuration: 0.5, pressing: { isPressing in
                 if isPressing {
                     // Press started — immediate feedback.
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    haptics.impact(.medium)
                 } else {
                     // Released before the long-press threshold — treat as a tap.
                     guard !isBusy else { return }
                     if cameraVM.startPreviewCapture() {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        haptics.impact(.light)
                         cameraService.capturePhoto(mode: .preview)
                     }
                 }
             }) {
                 // Long-press threshold reached — run manual AI inference.
                 guard !isBusy else { return }
-                UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                haptics.impact(.heavy)
                 autoExposure.triggerManualInference()
             }
             .accessibilityLabel("Preview RAW Image - Long press to trigger AI exposure")
