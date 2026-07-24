@@ -60,23 +60,28 @@ class SceneFeatureExtractor {
         // 1. Downsample image
         let downsampled = downsample(ciImage, toFit: analysisSize)
 
-        // 2. Convert to luminance buffer
-        guard let luminanceBuffer = extractLuminance(from: downsampled) else {
+        // 2. Convert to luminance buffer (dimensions carried alongside — the
+        //    center-weighted metering needs the real shape, not a guess).
+        guard let luminance = extractLuminance(from: downsampled) else {
             Logger.ml.error("Failed to extract luminance")
             return nil
         }
 
         // 3. One byte-quantized histogram feeds both the median and the tonal
         //    bins; vDSP covers the rest of the statistics.
-        let bins = quantizedHistogram(luminanceBuffer)
-        let stats = computeStatistics(luminanceBuffer: luminanceBuffer, histogram: bins)
-        let histogram = computeHistogram(histogram: bins, totalPixels: luminanceBuffer.count)
+        let bins = quantizedHistogram(luminance.values)
+        let stats = computeStatistics(luminanceBuffer: luminance.values, histogram: bins)
+        let histogram = computeHistogram(histogram: bins, totalPixels: luminance.values.count)
 
         // 4. Extract color info
         let colorInfo = extractColorInfo(from: downsampled)
 
         // 5. Compute center-weighted luminance
-        let centerWeighted = computeCenterWeightedLuminance(luminanceBuffer: luminanceBuffer)
+        let centerWeighted = computeCenterWeightedLuminance(
+            luminanceBuffer: luminance.values,
+            width: luminance.width,
+            height: luminance.height
+        )
 
         // 6. Normalize brightness by the frame's exposure to get absolute scene light
         let sceneLight = SceneFeatures.computeSceneLightLevel(
@@ -117,8 +122,11 @@ class SceneFeatureExtractor {
         return image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
     }
 
-    /// Extract luminance values as Float array using Rec. 709 coefficients
-    private func extractLuminance(from image: CIImage) -> [Float]? {
+    /// Extract luminance values as a Float array using Rec. 709 coefficients,
+    /// with the buffer's real dimensions. The shape is returned rather than
+    /// inferred later: `downsample` preserves aspect ratio, so the buffer is
+    /// generally not square and cannot be reconstructed from its count.
+    private func extractLuminance(from image: CIImage) -> (values: [Float], width: Int, height: Int)? {
         // Convert to grayscale using Rec. 709: Y = 0.2126R + 0.7152G + 0.0722B
         let grayscale = image.applyingFilter("CIColorMatrix", parameters: [
             "inputRVector": lumaVector,
@@ -153,7 +161,7 @@ class SceneFeatureExtractor {
         var divisor: Float = 255
         vDSP_vsdiv(floatPixels, 1, &divisor, &floatPixels, 1, vDSP_Length(floatPixels.count))
 
-        return floatPixels
+        return (floatPixels, width, height)
     }
 
     /// 256-bin counting histogram of the luminance values. The buffer came from
@@ -315,47 +323,50 @@ class SceneFeatureExtractor {
         }
     }
 
-    /// Compute center-weighted luminance using Gaussian weighting
-    /// Mimics traditional center-weighted metering in photography
-    private func computeCenterWeightedLuminance(luminanceBuffer: [Float]) -> Float {
-        // Calculate actual dimensions from buffer size (assumes square image)
-        let totalPixels = luminanceBuffer.count
-        let dimension = Int(sqrt(Double(totalPixels)))
+    /// Compute center-weighted luminance using Gaussian weighting.
+    /// Mimics traditional center-weighted metering in photography: the middle
+    /// of the frame counts for more than the edges.
+    ///
+    /// Sigma is a quarter of *each* axis, so the frame edge sits at 2σ (~13.5%
+    /// weight) on both axes whatever the aspect ratio. That is the same
+    /// relationship the original square-only code had, generalized per axis
+    /// rather than replaced — a square buffer produces identical weights.
+    ///
+    /// The 2D Gaussian is separable — exp(-(dx²/2σx² + dy²/2σy²)) factors into
+    /// exp(-dx²/2σx²)·exp(-dy²/2σy²) — so the two 1D profiles cost width+height
+    /// `exp` calls instead of width×height (≈450 instead of ≈49,000), and the
+    /// weighted sum becomes one vDSP dot product per row. No cached state, so
+    /// the extractor stays free of shared mutable data.
+    private func computeCenterWeightedLuminance(
+        luminanceBuffer: [Float],
+        width: Int,
+        height: Int
+    ) -> Float {
+        guard width > 0, height > 0, luminanceBuffer.count == width * height else { return 0 }
 
-        // Safety check: ensure buffer is valid
-        guard dimension * dimension == totalPixels else {
-            // Fallback to simple mean if buffer size doesn't match expected dimensions
-            var mean: Float = 0
-            vDSP_meanv(luminanceBuffer, 1, &mean, vDSP_Length(luminanceBuffer.count))
-            return mean
+        let sigmaX = Float(width) / 4.0
+        let sigmaY = Float(height) / 4.0
+        let weightsX = (0..<width).map { x -> Float in
+            let dx = Float(x) - Float(width) / 2.0
+            return exp(-(dx * dx) / (2 * sigmaX * sigmaX))
+        }
+        let weightsY = (0..<height).map { y -> Float in
+            let dy = Float(y) - Float(height) / 2.0
+            return exp(-(dy * dy) / (2 * sigmaY * sigmaY))
         }
 
-        let width = dimension
-        let height = dimension
-
-        // Gaussian weighting parameters
-        let centerX = Float(width) / 2.0
-        let centerY = Float(height) / 2.0
-        let sigma = Float(width) / 4.0  // Standard deviation (covers ~95% at edges)
-
         var weightedSum: Float = 0
-        var totalWeight: Float = 0
-
-        for y in 0..<height {
-            for x in 0..<width {
-                let dx = Float(x) - centerX
-                let dy = Float(y) - centerY
-                let distanceSquared = dx * dx + dy * dy
-
-                // Gaussian weight: exp(-distance²/(2σ²))
-                let weight = exp(-distanceSquared / (2 * sigma * sigma))
-
-                let pixel = luminanceBuffer[y * width + x]
-                weightedSum += pixel * weight
-                totalWeight += weight
+        luminanceBuffer.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return }
+            for y in 0..<height {
+                var rowSum: Float = 0
+                vDSP_dotpr(base + y * width, 1, weightsX, 1, &rowSum, vDSP_Length(width))
+                weightedSum += rowSum * weightsY[y]
             }
         }
 
+        // The full weight matrix sums to the product of the two profile sums.
+        let totalWeight = weightsX.reduce(0, +) * weightsY.reduce(0, +)
         return weightedSum / totalWeight
     }
 }

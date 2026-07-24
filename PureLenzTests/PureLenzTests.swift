@@ -186,3 +186,47 @@ struct SceneFeatureExtractorGuardTests {
         #expect(extractor.extract(from: image, frameISO: 100, frameShutterSeconds: 0) == nil)
     }
 }
+
+@Suite("Center-weighted metering")
+struct CenterWeightedMeteringTests {
+    /// Build a dark frame with a bright square at its centre.
+    /// 4:3 is what the sensor delivers, and it is exactly the shape that used
+    /// to fail the square-buffer guard and silently fall back to a plain mean.
+    private func centreBrightFrame() -> CIImage {
+        let frame = CGRect(x: 0, y: 0, width: 256, height: 192)
+        let background = CIImage(color: CIColor.black).cropped(to: frame)
+        let centrePatch = CIImage(color: CIColor.white)
+            .cropped(to: CGRect(x: 96, y: 64, width: 64, height: 64))
+        return centrePatch.composited(over: background)
+    }
+
+    @Test("centre weighting runs on non-square frames instead of falling back to the mean")
+    func weightsCentreOnNonSquareFrame() throws {
+        let features = try #require(
+            SceneFeatureExtractor().extract(
+                from: centreBrightFrame(), frameISO: 100, frameShutterSeconds: 1.0 / 60.0
+            )
+        )
+
+        // A bright centre on a dark surround must read brighter under centre
+        // weighting than under a flat average. Equality is the exact signature
+        // of the old bug: the fallback returned the plain mean.
+        #expect(features.centerWeightedLuminance > features.meanLuminance)
+    }
+
+    @Test("a uniform frame meters to its own luminance whatever the weighting")
+    func uniformFrameMatchesMean() throws {
+        // With no spatial variation the weighted mean must equal the plain
+        // mean — this pins the weight normalisation (sum of weights) as
+        // correct, which a lopsided weight table would break.
+        let flat = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5))
+            .cropped(to: CGRect(x: 0, y: 0, width: 256, height: 192))
+        let features = try #require(
+            SceneFeatureExtractor().extract(
+                from: flat, frameISO: 100, frameShutterSeconds: 1.0 / 60.0
+            )
+        )
+
+        #expect(abs(features.centerWeightedLuminance - features.meanLuminance) < 0.001)
+    }
+}

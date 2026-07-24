@@ -29,27 +29,31 @@ enum CameraConstants {
     static let slowestManualShutter: Double = 1.0 / 2.0
 }
 
-/// On-device trained CoreML model files, shared by ModelTrainer (writer) and
-/// AutoExposureManager (reader) so the two can never disagree on names.
-/// The V2 suffix marks the log2-target schema; bumping the version means
-/// renaming here and moving the old names into `legacyModelURLs` so stale
-/// models are cleaned up at launch.
-enum MLModelFiles {
+/// On-device ML artifacts: the two trained model files and the recorded
+/// training dataset. Named in one place so the writer (ModelTrainer), the
+/// reader (AutoExposureManager), and the recorder (TrainingDataManager) can
+/// never disagree — and so a schema bump touches all three together.
+///
+/// The V3 suffix marks the current schema: 14 features (including a true
+/// Gaussian center-weighted luminance) with log2-space targets. Any change to
+/// the feature set, to what a feature means, or to the target space makes
+/// previously recorded samples and previously trained models incompatible.
+/// Bump the suffix on all three names and the stale files are simply never
+/// read again — no per-version cleanup code to carry forward.
+enum MLFiles {
     /// Compiled ISO regressor installed in the Documents directory.
     static var isoModelURL: URL {
-        URL.documentsDirectory.appendingPathComponent("ISORegressorV2.mlmodelc")
+        URL.documentsDirectory.appendingPathComponent("ISORegressorV3.mlmodelc")
     }
 
     /// Compiled shutter regressor installed in the Documents directory.
     static var shutterModelURL: URL {
-        URL.documentsDirectory.appendingPathComponent("ShutterRegressorV2.mlmodelc")
+        URL.documentsDirectory.appendingPathComponent("ShutterRegressorV3.mlmodelc")
     }
 
-    /// Superseded model files (raw-linear V1 targets), deleted at launch.
-    static var legacyModelURLs: [URL] {
-        ["ISORegressor.mlmodelc", "ShutterRegressor.mlmodelc"].map {
-            URL.documentsDirectory.appendingPathComponent($0)
-        }
+    /// Recorded training samples.
+    static var trainingDataURL: URL {
+        URL.documentsDirectory.appendingPathComponent("trainingDataV3.json")
     }
 }
 

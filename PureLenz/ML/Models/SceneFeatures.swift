@@ -74,8 +74,8 @@ struct SceneFeatures: Codable {
     /// The preview's luminance alone is ambiguous — a well-exposed sunny scene
     /// and a well-exposed dim scene look the same — so this divides out the
     /// exposure the frame was captured with to recover the absolute light level.
-    /// Datasets recorded before this feature existed are discarded by
-    /// TrainingDataManager's V2 filename migration.
+    /// Datasets recorded before this feature existed carry an older schema
+    /// suffix (see `MLFiles`) and are never read.
     let sceneLightLevel: Float
 
     // MARK: - Metadata

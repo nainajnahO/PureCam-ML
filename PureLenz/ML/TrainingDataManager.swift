@@ -27,15 +27,7 @@ class TrainingDataManager {
     // MARK: - Initialization
 
     init() {
-        self.fileURL = URL.documentsDirectory.appendingPathComponent("trainingDataV2.json")
-
-        // V1 samples lack sceneLightLevel and carry potentially stale exposure
-        // labels, so they can't train the V2 models — delete the old dataset
-        // and start recording fresh.
-        try? FileManager.default.removeItem(
-            at: URL.documentsDirectory.appendingPathComponent("trainingData.json")
-        )
-
+        self.fileURL = MLFiles.trainingDataURL
         self.dataset = Self.loadDataset(from: fileURL) ?? TrainingDataset()
     }
 

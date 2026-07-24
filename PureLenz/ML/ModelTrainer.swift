@@ -112,7 +112,7 @@ class ModelTrainer {
         let metadata = MLModelMetadata(
             author: "PureLenz",
             shortDescription: "Auto-exposure regressor trained on user preferences (sequential prediction, log2 targets)",
-            version: "2.0"
+            version: "3.0"
         )
 
         try isoRegressor.write(to: isoModelURL, metadata: metadata)
@@ -121,10 +121,10 @@ class ModelTrainer {
         let compiledISOURL = try MLModel.compileModel(at: isoModelURL)
         let compiledShutterURL = try MLModel.compileModel(at: shutterModelURL)
 
-        try? FileManager.default.removeItem(at: MLModelFiles.isoModelURL)
-        try? FileManager.default.removeItem(at: MLModelFiles.shutterModelURL)
-        try FileManager.default.copyItem(at: compiledISOURL, to: MLModelFiles.isoModelURL)
-        try FileManager.default.copyItem(at: compiledShutterURL, to: MLModelFiles.shutterModelURL)
+        try? FileManager.default.removeItem(at: MLFiles.isoModelURL)
+        try? FileManager.default.removeItem(at: MLFiles.shutterModelURL)
+        try FileManager.default.copyItem(at: compiledISOURL, to: MLFiles.isoModelURL)
+        try FileManager.default.copyItem(at: compiledShutterURL, to: MLFiles.shutterModelURL)
 
         let elapsed = Date().timeIntervalSince(startTime)
         Logger.ml.info("Model training completed in \(String(format: "%.1f", elapsed))s")

@@ -102,20 +102,16 @@ class AutoExposureManager {
     /// not ready (the startup-inference path falls back to iOS auto).
     private func loadModel() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // V1 migration; a cheap no-op on every load after the first, since
-            // the files never reappear.
-            Self.removeLegacyV1Models()
-
             let newState: State
             var models: (iso: MLModel, shutter: MLModel)?
-            if FileManager.default.fileExists(atPath: MLModelFiles.isoModelURL.path),
-               FileManager.default.fileExists(atPath: MLModelFiles.shutterModelURL.path) {
+            if FileManager.default.fileExists(atPath: MLFiles.isoModelURL.path),
+               FileManager.default.fileExists(atPath: MLFiles.shutterModelURL.path) {
                 do {
                     let config = MLModelConfiguration()
                     config.computeUnits = .cpuAndNeuralEngine
                     models = (
-                        iso: try MLModel(contentsOf: MLModelFiles.isoModelURL, configuration: config),
-                        shutter: try MLModel(contentsOf: MLModelFiles.shutterModelURL, configuration: config)
+                        iso: try MLModel(contentsOf: MLFiles.isoModelURL, configuration: config),
+                        shutter: try MLModel(contentsOf: MLFiles.shutterModelURL, configuration: config)
                     )
                     newState = .ready
                     Logger.ml.info("Both ML models loaded successfully (sequential prediction)")
@@ -362,18 +358,6 @@ class AutoExposureManager {
         trainer.train()
     }
 
-    // MARK: - Utilities
-
-    /// Delete V1 models (raw-linear target schema). Their output columns don't
-    /// match the log2-space readers, so they must never be loaded; V2 models
-    /// train from freshly recorded samples (the old dataset is discarded too).
-    private static func removeLegacyV1Models() {
-        for url in MLModelFiles.legacyModelURLs {
-            if (try? FileManager.default.removeItem(at: url)) != nil {
-                Logger.ml.info("Removed legacy V1 model \(url.lastPathComponent)")
-            }
-        }
-    }
 }
 
 // MARK: - Notification Names
