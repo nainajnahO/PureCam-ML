@@ -76,6 +76,8 @@ class TrainingDataManager {
             print("Loaded \(dataset.samples.count) training samples")
             return dataset
         } catch {
+            // Also the intended path for pre-sceneLightLevel datasets: the field
+            // is required, so old data fails decode and recording starts fresh.
             print("Failed to load training data: \(error)")
             return nil
         }

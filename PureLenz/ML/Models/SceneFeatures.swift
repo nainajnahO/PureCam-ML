@@ -74,9 +74,9 @@ struct SceneFeatures: Codable {
     /// The preview's luminance alone is ambiguous — a well-exposed sunny scene
     /// and a well-exposed dim scene look the same — so this divides out the
     /// exposure the frame was captured with to recover the absolute light level.
-    /// Optional because samples recorded before this feature existed lack it;
-    /// `ModelTrainer` retro-computes it for those from the sample's labels.
-    let sceneLightLevel: Float?
+    /// Required: datasets recorded before this feature existed fail to decode,
+    /// which intentionally discards them (see TrainingDataManager.loadDataset).
+    let sceneLightLevel: Float
 
     // MARK: - Metadata
 
@@ -86,10 +86,6 @@ struct SceneFeatures: Codable {
     // MARK: - Scene Light Computation
 
     /// Compute the exposure-normalized scene brightness in stops.
-    ///
-    /// Single source of truth for the formula: used by `SceneFeatureExtractor`
-    /// for live frames and by `ModelTrainer` to retro-compute the value for
-    /// legacy samples (whose frames were exposed at the label settings).
     static func computeSceneLightLevel(meanLuminance: Float, iso: Float, shutterSeconds: Double) -> Float {
         let luminance = max(meanLuminance, LuminanceConstants.sceneLightLuminanceFloor)
         let exposure = max(Double(iso) * shutterSeconds, 1e-9)
@@ -100,7 +96,7 @@ struct SceneFeatures: Codable {
 
     /// Convert to MLFeatureProvider for CoreML inference
     func toMLFeatureProvider() throws -> MLDictionaryFeatureProvider {
-        var dict: [String: Any] = [
+        let dict: [String: Any] = [
             "meanLuminance": meanLuminance,
             "medianLuminance": medianLuminance,
             "minLuminance": minLuminance,
@@ -113,15 +109,9 @@ struct SceneFeatures: Codable {
             "clippedShadowsPercent": clippedShadowsPercent,
             "colorTemperature": colorTemperature,
             "saturation": saturation,
-            "centerWeightedLuminance": centerWeightedLuminance
+            "centerWeightedLuminance": centerWeightedLuminance,
+            "sceneLightLevel": sceneLightLevel
         ]
-        // Live extraction always sets this; only decoded legacy samples can be
-        // nil, and those never reach inference. Omitting the key (rather than
-        // substituting a fake value) makes the model throw loudly if that
-        // assumption ever breaks.
-        if let sceneLightLevel {
-            dict["sceneLightLevel"] = sceneLightLevel
-        }
         return try MLDictionaryFeatureProvider(dictionary: dict)
     }
 }

@@ -79,10 +79,10 @@ class AutoExposureManager {
             self?.handleBatteryStateChange()
         }
 
-        // The battery observer only fires on state *changes*, so a launch while
-        // already on the charger would otherwise wait a full charge cycle for
-        // its retrain — exactly the state the V1→V2 migration leaves behind
-        // (models deleted, dataset ready). Check the current state once.
+        // The battery observer only fires on state *changes*, so a launch that
+        // happens while already on the charger would otherwise wait for the
+        // next plug-in (or a capture while charging) before training. Check
+        // the current state once.
         switch state {
         case .disabled, .error:
             checkAndTriggerTrainingIfNeeded()
@@ -389,7 +389,7 @@ class AutoExposureManager {
 
     /// Delete V1 models (raw-linear target schema). Their output columns don't
     /// match the log2-space readers, so they must never be loaded; V2 models
-    /// retrain from the same dataset on the next charge.
+    /// train from freshly recorded samples (the old dataset is discarded too).
     private func removeLegacyV1Models() {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         for legacyName in ["ISORegressor.mlmodelc", "ShutterRegressor.mlmodelc"] {
