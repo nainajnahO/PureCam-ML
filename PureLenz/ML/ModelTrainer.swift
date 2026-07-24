@@ -134,7 +134,7 @@ class ModelTrainer {
         print("Step 3: Training ISO model...")
         let isoRegressor = try MLBoostedTreeRegressor(
             trainingData: isoDataFrame,
-            targetColumn: "targetISO"
+            targetColumn: "targetLogISO"
         )
         print("ISO model trained successfully")
 
@@ -150,7 +150,7 @@ class ModelTrainer {
         print("Step 5: Training shutter model...")
         let shutterRegressor = try MLBoostedTreeRegressor(
             trainingData: shutterDataFrame,
-            targetColumn: "targetShutterSeconds"
+            targetColumn: "targetLogShutter"
         )
         print("Shutter model trained successfully")
 
@@ -162,8 +162,8 @@ class ModelTrainer {
 
         let metadata = MLModelMetadata(
             author: "PureLenz",
-            shortDescription: "Auto-exposure regressor trained on user preferences (sequential prediction)",
-            version: "1.0"
+            shortDescription: "Auto-exposure regressor trained on user preferences (sequential prediction, log2 targets)",
+            version: "2.0"
         )
 
         try isoRegressor.write(to: isoModelURL, metadata: metadata)
@@ -179,8 +179,8 @@ class ModelTrainer {
         // Copy compiled models to documents directory
         print("Step 8: Installing models...")
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let finalISOURL = documentsPath.appendingPathComponent("ISORegressor.mlmodelc")
-        let finalShutterURL = documentsPath.appendingPathComponent("ShutterRegressor.mlmodelc")
+        let finalISOURL = documentsPath.appendingPathComponent("ISORegressorV2.mlmodelc")
+        let finalShutterURL = documentsPath.appendingPathComponent("ShutterRegressorV2.mlmodelc")
 
         // Remove old models if they exist
         try? FileManager.default.removeItem(at: finalISOURL)
@@ -217,7 +217,15 @@ class ModelTrainer {
                 f.clippedShadowsPercent,
                 f.colorTemperature,
                 f.saturation,
-                f.centerWeightedLuminance
+                f.centerWeightedLuminance,
+                // Samples recorded before sceneLightLevel existed lack it, but
+                // their frames were exposed at the label settings, so it can be
+                // recovered exactly from the sample's own labels.
+                f.sceneLightLevel ?? SceneFeatures.computeSceneLightLevel(
+                    meanLuminance: f.meanLuminance,
+                    iso: sample.userChosenISO,
+                    shutterSeconds: sample.userChosenShutterSeconds
+                )
             ])
 
             targets.append((sample.userChosenISO, sample.userChosenShutterSeconds))

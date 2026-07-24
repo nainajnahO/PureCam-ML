@@ -34,9 +34,12 @@ class SceneFeatureExtractor {
     // MARK: - Public Methods
 
     /// Extract scene features from CIImage
-    /// - Parameter ciImage: Live camera preview or captured image
+    /// - Parameters:
+    ///   - ciImage: Live camera preview or captured image
+    ///   - frameISO: ISO the frame was captured with (for scene-light normalization)
+    ///   - frameShutterSeconds: Exposure duration the frame was captured with
     /// - Returns: SceneFeatures if successful, nil otherwise
-    func extract(from ciImage: CIImage) -> SceneFeatures? {
+    func extract(from ciImage: CIImage, frameISO: Float, frameShutterSeconds: Double) -> SceneFeatures? {
         let startTime = Date()
 
         // 1. Downsample image
@@ -60,6 +63,13 @@ class SceneFeatureExtractor {
         // 6. Compute center-weighted luminance
         let centerWeighted = computeCenterWeightedLuminance(luminanceBuffer: luminanceBuffer)
 
+        // 7. Normalize brightness by the frame's exposure to get absolute scene light
+        let sceneLight = SceneFeatures.computeSceneLightLevel(
+            meanLuminance: stats.mean,
+            iso: frameISO,
+            shutterSeconds: frameShutterSeconds
+        )
+
         let features = SceneFeatures(
             meanLuminance: stats.mean,
             medianLuminance: stats.median,
@@ -74,6 +84,7 @@ class SceneFeatureExtractor {
             colorTemperature: colorInfo.temperature,
             saturation: colorInfo.saturation,
             centerWeightedLuminance: centerWeighted,
+            sceneLightLevel: sceneLight,
             timestamp: Date()
         )
 

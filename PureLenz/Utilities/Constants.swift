@@ -47,6 +47,10 @@ enum LuminanceConstants {
 
     /// Upper bound of the midtones histogram bin (normalized luminance).
     static let midtonesUpperBound: Float = 0.75
+
+    /// Floor applied to mean luminance before taking log2 in the scene-light
+    /// computation, so an all-black frame stays finite.
+    static let sceneLightLuminanceFloor: Float = 1e-4
 }
 
 /// Tuning constants for manual exposure gesture feedback.

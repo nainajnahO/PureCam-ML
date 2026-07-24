@@ -35,6 +35,18 @@ class AutoExposureManager {
     private(set) var state: State = .disabled
     private(set) var hasRunStartupInference = false
 
+    enum InferenceError: LocalizedError {
+        /// The model's output was missing the expected feature column.
+        case invalidModelOutput(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidModelOutput(let column):
+                return "Invalid model output (missing \(column))"
+            }
+        }
+    }
+
     // MARK: - Dependencies
 
     private var isoModel: MLModel?
@@ -76,6 +88,8 @@ class AutoExposureManager {
     // MARK: - Model Management
 
     private func loadModel() {
+        removeLegacyV1Models()
+
         let isoURL = getISOModelURL()
         let shutterURL = getShutterModelURL()
 
@@ -112,9 +126,9 @@ class AutoExposureManager {
 
     /// Run ML inference ONCE at startup, return predicted exposure settings
     /// Uses SEQUENTIAL PREDICTION: ISO first, then shutter based on predicted ISO
-    /// - Parameter previewImage: Live camera preview (CIImage from video buffer)
+    /// - Parameter frame: Live camera preview frame plus the exposure it was captured with
     /// - Returns: (iso, shutterSeconds) if successful, nil otherwise
-    func runStartupInference(from previewImage: CIImage) -> (iso: Float, shutterSeconds: Double)? {
+    func runStartupInference(from frame: CameraService.CapturedFrame) -> (iso: Float, shutterSeconds: Double)? {
         guard !hasRunStartupInference else {
             print("Startup inference already completed")
             return nil
@@ -132,46 +146,32 @@ class AutoExposureManager {
         let startTime = Date()
 
         // 1. Extract features
-        guard let features = featureExtractor.extract(from: previewImage) else {
+        guard let features = featureExtractor.extract(
+            from: frame.image,
+            frameISO: frame.iso,
+            frameShutterSeconds: frame.shutterSeconds
+        ) else {
             state = .error("Feature extraction failed")
             return nil
         }
 
         // 2. SEQUENTIAL PREDICTION
         do {
-            let sceneFeatures = try features.toMLFeatureProvider()
-
-            // Step 1: Predict ISO from scene features
-            let isoPrediction = try isoModel.prediction(from: sceneFeatures)
-            guard let predictedISO = isoPrediction.featureValue(for: "targetISO")?.doubleValue else {
-                state = .error("Invalid ISO prediction output")
-                return nil
-            }
-
-            // Step 2: Predict shutter from scene features + predicted ISO
-            var shutterFeaturesDict = sceneFeatures.featureNames.reduce(into: [String: Any]()) { dict, name in
-                dict[name] = sceneFeatures.featureValue(for: name)?.doubleValue ?? 0.0
-            }
-            // Add predicted ISO as additional feature
-            shutterFeaturesDict["chosenISO"] = predictedISO
-
-            let shutterFeatures = try MLDictionaryFeatureProvider(dictionary: shutterFeaturesDict)
-            let shutterPrediction = try shutterModel.prediction(from: shutterFeatures)
-
-            guard let predictedShutter = shutterPrediction.featureValue(for: "targetShutterSeconds")?.doubleValue else {
-                state = .error("Invalid shutter prediction output")
-                return nil
-            }
+            let prediction = try predictExposure(
+                features: features,
+                isoModel: isoModel,
+                shutterModel: shutterModel
+            )
 
             let elapsed = Date().timeIntervalSince(startTime) * 1000
             print("Sequential ML inference completed in \(String(format: "%.1f", elapsed))ms")
-            print("     ISO: \(Int(predictedISO))")
-            print("     Shutter: 1/\(Int(1.0/predictedShutter))")
+            print("     ISO: \(Int(prediction.iso))")
+            print("     Shutter: 1/\(Int(1.0/prediction.shutterSeconds))")
 
             hasRunStartupInference = true
             state = .applied
 
-            return (iso: Float(predictedISO), shutterSeconds: predictedShutter)
+            return prediction
 
         } catch {
             state = .error("Inference failed: \(error.localizedDescription)")
@@ -182,9 +182,9 @@ class AutoExposureManager {
 
     /// Run ML inference manually (triggered by user action like long press)
     /// Unlike runStartupInference, this can be called multiple times
-    /// - Parameter previewImage: Live camera preview (CIImage from video buffer)
+    /// - Parameter frame: Live camera preview frame plus the exposure it was captured with
     /// - Returns: (iso, shutterSeconds) if successful, nil otherwise
-    func runManualInference(from previewImage: CIImage) -> (iso: Float, shutterSeconds: Double)? {
+    func runManualInference(from frame: CameraService.CapturedFrame) -> (iso: Float, shutterSeconds: Double)? {
         guard let isoModel = isoModel,
               let shutterModel = shutterModel else {
             print("Models not available for manual inference (state: \(state))")
@@ -210,50 +210,73 @@ class AutoExposureManager {
         let startTime = Date()
 
         // 1. Extract features
-        guard let features = featureExtractor.extract(from: previewImage) else {
+        guard let features = featureExtractor.extract(
+            from: frame.image,
+            frameISO: frame.iso,
+            frameShutterSeconds: frame.shutterSeconds
+        ) else {
             state = .error("Feature extraction failed")
             return nil
         }
 
         // 2. SEQUENTIAL PREDICTION (same as startup inference)
         do {
-            let sceneFeatures = try features.toMLFeatureProvider()
-
-            // Step 1: Predict ISO from scene features
-            let isoPrediction = try isoModel.prediction(from: sceneFeatures)
-            guard let predictedISO = isoPrediction.featureValue(for: "targetISO")?.doubleValue else {
-                state = .error("Invalid ISO prediction output")
-                return nil
-            }
-
-            // Step 2: Predict shutter from scene features + predicted ISO
-            var shutterFeaturesDict = sceneFeatures.featureNames.reduce(into: [String: Any]()) { dict, name in
-                dict[name] = sceneFeatures.featureValue(for: name)?.doubleValue ?? 0.0
-            }
-            shutterFeaturesDict["chosenISO"] = predictedISO
-
-            let shutterFeatures = try MLDictionaryFeatureProvider(dictionary: shutterFeaturesDict)
-            let shutterPrediction = try shutterModel.prediction(from: shutterFeatures)
-
-            guard let predictedShutter = shutterPrediction.featureValue(for: "targetShutterSeconds")?.doubleValue else {
-                state = .error("Invalid shutter prediction output")
-                return nil
-            }
+            let prediction = try predictExposure(
+                features: features,
+                isoModel: isoModel,
+                shutterModel: shutterModel
+            )
 
             let elapsed = Date().timeIntervalSince(startTime) * 1000
             print("Manual ML inference completed in \(String(format: "%.1f", elapsed))ms")
-            print("     ISO: \(Int(predictedISO))")
-            print("     Shutter: 1/\(Int(1.0/predictedShutter))")
+            print("     ISO: \(Int(prediction.iso))")
+            print("     Shutter: 1/\(Int(1.0/prediction.shutterSeconds))")
 
             state = .applied
 
-            return (iso: Float(predictedISO), shutterSeconds: predictedShutter)
+            return prediction
 
         } catch {
             state = .error("Inference failed: \(error.localizedDescription)")
             print("Manual inference error: \(error)")
             return nil
         }
+    }
+
+    /// Two-stage prediction shared by startup and manual inference: ISO from
+    /// scene features, then shutter from scene features + the predicted ISO.
+    ///
+    /// Both models are trained in log2 (stops) space — see DataFrameBuilder —
+    /// so a 1-stop error costs the same at ISO 50 as at ISO 3200. Outputs are
+    /// exponentiated back to raw ISO / seconds here, and the raw log2 ISO is
+    /// what the shutter model receives as its `chosenLogISO` input.
+    private func predictExposure(
+        features: SceneFeatures,
+        isoModel: MLModel,
+        shutterModel: MLModel
+    ) throws -> (iso: Float, shutterSeconds: Double) {
+        let sceneFeatures = try features.toMLFeatureProvider()
+
+        // Step 1: Predict log2(ISO) from scene features
+        let isoPrediction = try isoModel.prediction(from: sceneFeatures)
+        guard let predictedLogISO = isoPrediction.featureValue(for: "targetLogISO")?.doubleValue else {
+            throw InferenceError.invalidModelOutput("targetLogISO")
+        }
+
+        // Step 2: Predict log2(shutter) from scene features + predicted log2(ISO)
+        var shutterFeaturesDict = sceneFeatures.featureNames.reduce(into: [String: Any]()) { dict, name in
+            dict[name] = sceneFeatures.featureValue(for: name)?.doubleValue ?? 0.0
+        }
+        shutterFeaturesDict["chosenLogISO"] = predictedLogISO
+
+        let shutterFeatures = try MLDictionaryFeatureProvider(dictionary: shutterFeaturesDict)
+        let shutterPrediction = try shutterModel.prediction(from: shutterFeatures)
+
+        guard let predictedLogShutter = shutterPrediction.featureValue(for: "targetLogShutter")?.doubleValue else {
+            throw InferenceError.invalidModelOutput("targetLogShutter")
+        }
+
+        return (iso: Float(exp2(predictedLogISO)), shutterSeconds: exp2(predictedLogShutter))
     }
 
     // MARK: - Manual Override
@@ -345,12 +368,26 @@ class AutoExposureManager {
 
     private func getISOModelURL() -> URL {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return documentsPath.appendingPathComponent("ISORegressor.mlmodelc")
+        return documentsPath.appendingPathComponent("ISORegressorV2.mlmodelc")
     }
 
     private func getShutterModelURL() -> URL {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return documentsPath.appendingPathComponent("ShutterRegressor.mlmodelc")
+        return documentsPath.appendingPathComponent("ShutterRegressorV2.mlmodelc")
+    }
+
+    /// Delete V1 models (raw-linear target schema). Their output columns don't
+    /// match the log2-space readers, so they must never be loaded; V2 models
+    /// retrain from the same dataset on the next charge.
+    private func removeLegacyV1Models() {
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        for legacyName in ["ISORegressor.mlmodelc", "ShutterRegressor.mlmodelc"] {
+            let url = documentsPath.appendingPathComponent(legacyName)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try? FileManager.default.removeItem(at: url)
+                print("Removed legacy V1 model \(legacyName)")
+            }
+        }
     }
 
     // Legacy method for backwards compatibility

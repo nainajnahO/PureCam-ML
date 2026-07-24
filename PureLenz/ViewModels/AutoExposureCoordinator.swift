@@ -117,7 +117,11 @@ class AutoExposureCoordinator: NSObject {
             guard let self,
                   let frame = await self.cameraService.captureNextFrame() else { return }
             let extractor = SceneFeatureExtractor()
-            if let features = extractor.extract(from: frame) {
+            if let features = extractor.extract(
+                from: frame.image,
+                frameISO: frame.iso,
+                frameShutterSeconds: frame.shutterSeconds
+            ) {
                 manager.recordTrainingSample(
                     features: features,
                     iso: self.cameraService.currentISO,

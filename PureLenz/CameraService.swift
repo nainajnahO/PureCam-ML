@@ -19,6 +19,7 @@ import AVFoundation
 import Observation
 import Photos
 import OSLog
+import ImageIO
 
 @Observable
 class CameraService: NSObject {
@@ -43,10 +44,19 @@ class CameraService: NSObject {
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let videoOutputQueue = DispatchQueue(label: "com.purelenz.videoOutputQueue")
 
+    /// A live preview frame plus the exposure it was captured with. The exposure
+    /// lets ML normalize the frame's brightness into an absolute scene light level
+    /// (the same image can come from a sunny scene at ISO 32 or a dim one at ISO 1600).
+    struct CapturedFrame {
+        let image: CIImage
+        let iso: Float
+        let shutterSeconds: Double
+    }
+
     // On-demand frame delivery: the video output does no per-frame work until
     // something asks for a frame. Pending requests are fulfilled by the next
     // delivered sample buffer. All access is serialized on `videoOutputQueue`.
-    private var pendingFrameRequests: [(id: UUID, continuation: CheckedContinuation<CIImage?, Never>)] = []
+    private var pendingFrameRequests: [(id: UUID, continuation: CheckedContinuation<CapturedFrame?, Never>)] = []
 
     // Callback for preview captures - delivers decoded UIImage
     var onPreviewCaptured: ((UIImage) -> Void)?
@@ -379,13 +389,14 @@ class CameraService: NSObject {
         output.capturePhoto(with: settings, delegate: self)
     }
 
-    /// Request the next camera frame for ML feature extraction.
+    /// Request the next camera frame for ML feature extraction, along with the
+    /// exposure it was captured with.
     ///
     /// The video data output stays attached but does no per-frame work until a
     /// request is pending, at which point the next delivered sample buffer
     /// fulfills it. Returns nil if no frame arrives within `timeout` seconds
     /// (e.g. the session is not running).
-    func captureNextFrame(timeout: TimeInterval = 1.0) async -> CIImage? {
+    func captureNextFrame(timeout: TimeInterval = 1.0) async -> CapturedFrame? {
         let id = UUID()
         return await withCheckedContinuation { continuation in
             videoOutputQueue.async { [weak self] in
@@ -411,7 +422,7 @@ class CameraService: NSObject {
     /// preview layer — so it can never disturb the main viewfinder's connection.
     /// Returns nil if no frame arrives (e.g. the session is not running).
     func nextFramingPreviewImage(maxDimension: CGFloat) async -> UIImage? {
-        guard let ciImage = await captureNextFrame() else { return nil }
+        guard let ciImage = await captureNextFrame()?.image else { return nil }
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 // Upright in the portrait reference (videoRotationAngle 90° == .right),
@@ -530,10 +541,31 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
         // caller to render even after this callback returns.
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
 
+        // The exposure this exact frame was captured with, from the ISP's EXIF
+        // attachment. The cached currentISO/currentShutterSpeed can't be used
+        // here: they go stale whenever the device is in continuous auto-exposure.
+        var frameISO: Float = 0
+        var frameShutter: Double = 0
+        if let exif = CMGetAttachment(sampleBuffer,
+                                      key: kCGImagePropertyExifDictionary,
+                                      attachmentModeOut: nil) as? [String: Any] {
+            frameISO = (exif[kCGImagePropertyExifISOSpeedRatings as String] as? [NSNumber])?
+                .first?.floatValue ?? 0
+            frameShutter = (exif[kCGImagePropertyExifExposureTime as String] as? NSNumber)?
+                .doubleValue ?? 0
+        }
+        if frameISO <= 0 || frameShutter <= 0,
+           let device = (session.inputs.first as? AVCaptureDeviceInput)?.device {
+            frameISO = device.iso
+            frameShutter = device.exposureDuration.seconds
+        }
+
+        let frame = CapturedFrame(image: ciImage, iso: frameISO, shutterSeconds: frameShutter)
+
         let requests = pendingFrameRequests
         pendingFrameRequests.removeAll()
         for request in requests {
-            request.continuation.resume(returning: ciImage)
+            request.continuation.resume(returning: frame)
         }
     }
 }
