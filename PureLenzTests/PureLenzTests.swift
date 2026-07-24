@@ -151,6 +151,46 @@ struct DataFrameBuilderTests {
     }
 }
 
+@Suite("ModelTrainer label consistency")
+struct ModelTrainerLabelConsistencyTests {
+    private func makeSample(sceneLightLevel: Float?, iso: Float, shutterSeconds: Double) -> TrainingSample {
+        let features = SceneFeatures(
+            meanLuminance: 0.45, medianLuminance: 0.45, minLuminance: 0, maxLuminance: 1,
+            stdDevLuminance: 0.2, shadowsPercent: 0.2, midtonesPercent: 0.6, highlightsPercent: 0.2,
+            clippedHighlightsPercent: 0, clippedShadowsPercent: 0, colorTemperature: 5500,
+            saturation: 0.3, centerWeightedLuminance: 0.45,
+            sceneLightLevel: sceneLightLevel, timestamp: Date()
+        )
+        return TrainingSample(features: features, iso: iso, shutterSeconds: shutterSeconds)
+    }
+
+    @Test("legacy samples without sceneLightLevel are kept")
+    func legacyKept() {
+        let sample = makeSample(sceneLightLevel: nil, iso: 100, shutterSeconds: 1.0 / 100.0)
+        #expect(ModelTrainer.hasConsistentSceneLight(sample))
+    }
+
+    @Test("samples whose scene light matches their labels are kept")
+    func consistentKept() {
+        let stored = SceneFeatures.computeSceneLightLevel(
+            meanLuminance: 0.45, iso: 100, shutterSeconds: 1.0 / 100.0
+        )
+        let sample = makeSample(sceneLightLevel: stored, iso: 100, shutterSeconds: 1.0 / 100.0)
+        #expect(ModelTrainer.hasConsistentSceneLight(sample))
+    }
+
+    @Test("stale-label samples are dropped: true scene light, wrong label")
+    func staleLabelDropped() {
+        // Frame really shot in sunlight (ISO 32, 1/1000) but labeled with a
+        // stale indoor cache (ISO 800, 1/60) — the pre-fix poison pairing.
+        let trueSceneLight = SceneFeatures.computeSceneLightLevel(
+            meanLuminance: 0.45, iso: 32, shutterSeconds: 1.0 / 1000.0
+        )
+        let sample = makeSample(sceneLightLevel: trueSceneLight, iso: 800, shutterSeconds: 1.0 / 60.0)
+        #expect(!ModelTrainer.hasConsistentSceneLight(sample))
+    }
+}
+
 @Suite("SceneFeatureExtractor exposure guard")
 struct SceneFeatureExtractorGuardTests {
     @Test("rejects frames with unknown exposure instead of fabricating scene light")

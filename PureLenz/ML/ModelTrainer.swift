@@ -33,6 +33,8 @@ class ModelTrainer {
     enum TrainingError: Error {
         /// Another run is already in progress — this request was ignored.
         case alreadyRunning
+        /// Every sample was excluded as stale-labeled — nothing to train on.
+        case noUsableSamples
     }
 
     private let dataManager: TrainingDataManager
@@ -117,6 +119,7 @@ class ModelTrainer {
         // Prepare training data
         print("Step 1: Preparing training data...")
         let (features, targets) = prepareTrainingData()
+        guard !features.isEmpty else { throw TrainingError.noUsableSamples }
         print("Prepared \(features.count) samples with \(features[0].count) features each")
 
         // SEQUENTIAL PREDICTION: Two-stage model training
@@ -192,9 +195,32 @@ class ModelTrainer {
         print("Model training completed in \(String(format: "%.1f", elapsed))s")
     }
 
+    /// Whether a sample's stored sceneLightLevel agrees with the one its labels
+    /// imply. Builds between the sceneLightLevel feature and the frame-exposure
+    /// labeling fix recorded the frame's true scene light next to a label from
+    /// the stale exposure cache — a correct feature answered by the wrong
+    /// target, which is exactly the pairing that teaches daylight overexposure.
+    /// Legacy samples (nil) are retro-computed from their labels and therefore
+    /// consistent by construction; post-fix samples label from the frame itself.
+    /// The half-stop tolerance sits far above EXIF quantization noise and well
+    /// below real auto-exposure drift.
+    static func hasConsistentSceneLight(_ sample: TrainingSample) -> Bool {
+        guard let stored = sample.features.sceneLightLevel else { return true }
+        let labelImplied = SceneFeatures.computeSceneLightLevel(
+            meanLuminance: sample.features.meanLuminance,
+            iso: sample.userChosenISO,
+            shutterSeconds: sample.userChosenShutterSeconds
+        )
+        return abs(stored - labelImplied) <= 0.5
+    }
+
     /// Prepare training data from samples
     private func prepareTrainingData() -> (features: [[Float]], targets: [(Float, Double)]) {
-        let samples = dataManager.dataset.samples
+        let allSamples = dataManager.dataset.samples
+        let samples = allSamples.filter(Self.hasConsistentSceneLight)
+        if samples.count < allSamples.count {
+            print("Excluded \(allSamples.count - samples.count) stale-label samples from training")
+        }
 
         var features: [[Float]] = []
         var targets: [(Float, Double)] = []
