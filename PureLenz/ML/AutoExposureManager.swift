@@ -348,11 +348,18 @@ class AutoExposureManager {
         // Label with the frame's own exposure, not the cached
         // currentISO/currentShutterSpeed, which goes stale under continuous
         // auto-exposure — see CameraService.CapturedFrame.
-        dataManager.addSample(TrainingSample(
-            features: features,
-            iso: frame.iso,
-            shutterSeconds: frame.shutterSeconds
-        ))
+        //
+        // The thumbnail is the analysed frame itself. Keeping it is what lets a
+        // feature added to the schema later be computed for this sample rather
+        // than forcing the dataset to be discarded — see MLFiles.thumbnailDirectoryURL.
+        dataManager.addSample(
+            TrainingSample(
+                features: features,
+                iso: frame.iso,
+                shutterSeconds: frame.shutterSeconds
+            ),
+            thumbnail: featureExtractor.thumbnailData(from: frame.image)
+        )
 
         // Check if we should train (only when charging)
         checkAndTriggerTrainingIfNeeded()

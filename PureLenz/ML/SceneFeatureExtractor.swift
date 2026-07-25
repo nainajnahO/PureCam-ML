@@ -18,6 +18,7 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import CoreVideo
 import Accelerate
+import ImageIO
 import UIKit
 import OSLog
 
@@ -31,6 +32,11 @@ class SceneFeatureExtractor {
 
     /// Long edge of the luminance analysis buffer (reduces 12MP to ~50K pixels).
     private let analysisSize: CGFloat = 256
+
+    /// JPEG quality for stored sample thumbnails. High enough that the features
+    /// recomputed from a thumbnail match those taken from the live frame to well
+    /// inside the noise floor of 256-bin histograms and channel averages.
+    private let thumbnailQuality: CGFloat = 0.8
 
     /// Rec. 709 luma coefficients for the grayscale conversion.
     private let lumaVector = CIVector(
@@ -113,6 +119,35 @@ class SceneFeatureExtractor {
         Logger.ml.debug("Feature extraction: \(elapsed.formatted(.units(allowed: [.milliseconds], width: .abbreviated, fractionalPart: .show(length: 1))))")
 
         return features
+    }
+
+    /// JPEG-encode the frame at exactly the size `extract` analyses it.
+    ///
+    /// Stored alongside a training sample so a feature added later can be
+    /// computed for it. Because this reuses the same `downsample(_:toFit:)` and
+    /// `analysisSize` as `extract`, feeding the decoded result back through
+    /// `extract` re-runs the identical pipeline: the scale factor comes out at
+    /// 1.0, so no second downsample occurs and only JPEG quantization separates
+    /// the recomputed features from the originals.
+    ///
+    /// - Returns: JPEG data, or nil if the frame has no renderable extent.
+    func thumbnailData(from ciImage: CIImage) -> Data? {
+        let downsampled = downsample(ciImage, toFit: analysisSize)
+        guard !downsampled.extent.isEmpty, downsampled.extent.isInfinite == false,
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            Logger.ml.error("Cannot encode thumbnail for frame with extent \(downsampled.extent.debugDescription)")
+            return nil
+        }
+
+        return context.jpegRepresentation(
+            of: downsampled,
+            colorSpace: colorSpace,
+            options: [
+                CIImageRepresentationOption(
+                    rawValue: kCGImageDestinationLossyCompressionQuality as String
+                ): thumbnailQuality
+            ]
+        )
     }
 
     // MARK: - Private Helpers

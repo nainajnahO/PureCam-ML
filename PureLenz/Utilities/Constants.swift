@@ -59,6 +59,23 @@ enum MLFiles {
         URL.documentsDirectory.appendingPathComponent("trainingDataV3.json")
     }
 
+    /// Directory holding one JPEG per training sample: the downsampled buffer
+    /// feature extraction actually analysed, kept as raw material.
+    ///
+    /// Deliberately *not* version-suffixed, and that is the whole point. The
+    /// features derived from a frame go stale when the schema changes; the frame
+    /// itself never does. Keeping the pixels means a new feature can be computed
+    /// for samples recorded before it existed — a backfill instead of the reset
+    /// that a suffix bump forces. Stored beside the dataset rather than inside
+    /// it because these are cold: written once, read only during a backfill,
+    /// while `trainingDataURL` is decoded in full at every launch.
+    ///
+    /// Thumbnails are only meaningful attached to a sample's exposure labels, so
+    /// they are pruned against the dataset rather than kept independently.
+    static var thumbnailDirectoryURL: URL {
+        URL.documentsDirectory.appendingPathComponent("SampleThumbnails", isDirectory: true)
+    }
+
     /// The name stem and extension of each artifact family, used to recognise
     /// versioned files from *any* schema generation.
     private static let artifactPatterns: [(stem: String, fileExtension: String)] = [

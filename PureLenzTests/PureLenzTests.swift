@@ -9,6 +9,7 @@
 import Testing
 import SwiftUI
 import CoreImage
+import CoreImage.CIFilterBuiltins
 import CoreML
 import TabularData
 @testable import PureLenz
@@ -271,6 +272,120 @@ struct CenterWeightedMeteringTests {
         )
 
         #expect(abs(features.centerWeightedLuminance - features.meanLuminance) < 0.001)
+    }
+}
+
+@Suite("Sample thumbnails")
+struct SampleThumbnailTests {
+    /// A frame with brightness, colour and spatial structure, so the comparison
+    /// below exercises every feature family rather than a flat field that any
+    /// encoder would reproduce trivially.
+    private func texturedFrame() -> CIImage {
+        let frame = CGRect(x: 0, y: 0, width: 1024, height: 768)
+        let gradient = CIFilter.linearGradient()
+        gradient.point0 = CGPoint(x: 0, y: 0)
+        gradient.color0 = CIColor(red: 0.15, green: 0.2, blue: 0.35)
+        gradient.point1 = CGPoint(x: 1024, y: 768)
+        gradient.color1 = CIColor(red: 0.85, green: 0.75, blue: 0.5)
+        let background = (gradient.outputImage ?? CIImage(color: .gray)).cropped(to: frame)
+
+        let patch = CIImage(color: CIColor(red: 0.9, green: 0.3, blue: 0.2))
+            .cropped(to: CGRect(x: 384, y: 288, width: 256, height: 192))
+        return patch.composited(over: background)
+    }
+
+    /// The point of storing thumbnails: a sample recorded today must still be
+    /// usable when a feature is added tomorrow. That only holds if features
+    /// recomputed from the stored JPEG match those taken from the live frame.
+    @Test("features recomputed from a stored thumbnail match the originals")
+    func thumbnailRoundTripPreservesFeatures() throws {
+        let extractor = SceneFeatureExtractor()
+        let frame = texturedFrame()
+        let iso: Float = 200
+        let shutter = 1.0 / 120.0
+
+        let original = try #require(
+            extractor.extract(from: frame, frameISO: iso, frameShutterSeconds: shutter)
+        )
+
+        let data = try #require(extractor.thumbnailData(from: frame))
+        let decoded = try #require(CIImage(data: data))
+        let restored = try #require(
+            extractor.extract(from: decoded, frameISO: iso, frameShutterSeconds: shutter)
+        )
+
+        // Only JPEG quantization separates the two: `thumbnailData` encodes at
+        // `analysisSize`, so re-extraction finds scale 1.0 and does not
+        // downsample a second time.
+        #expect(abs(restored.meanLuminance - original.meanLuminance) < 0.02)
+        #expect(abs(restored.medianLuminance - original.medianLuminance) < 0.02)
+        #expect(abs(restored.centerWeightedLuminance - original.centerWeightedLuminance) < 0.02)
+        #expect(abs(restored.stdDevLuminance - original.stdDevLuminance) < 0.02)
+        #expect(abs(restored.saturation - original.saturation) < 0.05)
+        #expect(abs(restored.sceneLightLevel - original.sceneLightLevel) < 0.1)
+    }
+
+    /// Pins the property the round-trip depends on. If the stored image were
+    /// larger or smaller than `analysisSize`, re-extraction would downsample
+    /// again and the recomputed features would drift from the originals.
+    @Test("a thumbnail is stored at exactly the analysis size")
+    func thumbnailIsStoredAtAnalysisSize() throws {
+        let data = try #require(SceneFeatureExtractor().thumbnailData(from: texturedFrame()))
+        let decoded = try #require(CIImage(data: data))
+
+        #expect(max(decoded.extent.width, decoded.extent.height) == 256)
+        // Aspect ratio preserved: 1024x768 is 4:3, so the short edge is 192.
+        #expect(min(decoded.extent.width, decoded.extent.height) == 192)
+    }
+
+    /// A thumbnail per sample is only affordable if each stays small — 500 of
+    /// these live in iCloud-backed Documents.
+    @Test("a thumbnail is small enough to keep one per sample")
+    func thumbnailStaysSmall() throws {
+        let data = try #require(SceneFeatureExtractor().thumbnailData(from: texturedFrame()))
+        #expect(data.count < 32_768)
+    }
+}
+
+@Suite("Training dataset eviction")
+struct TrainingDatasetEvictionTests {
+    private func sample() -> TrainingSample {
+        TrainingSample(
+            features: SceneFeatures(
+                meanLuminance: 0.5, medianLuminance: 0.5, minLuminance: 0, maxLuminance: 1,
+                stdDevLuminance: 0.2, shadowsPercent: 0.2, midtonesPercent: 0.6,
+                highlightsPercent: 0.2, clippedHighlightsPercent: 0.01,
+                clippedShadowsPercent: 0.01, colorTemperature: 5500, saturation: 0.3,
+                centerWeightedLuminance: 0.5, sceneLightLevel: 3.3, timestamp: Date()
+            ),
+            iso: 64,
+            shutterSeconds: 1.0 / 256.0
+        )
+    }
+
+    @Test("adding below the cap evicts nothing")
+    func noEvictionBelowCap() {
+        var dataset = TrainingDataset()
+        for _ in 0..<TrainingDataset.maxSamples {
+            #expect(dataset.addSample(sample()).isEmpty)
+        }
+        #expect(dataset.samples.count == TrainingDataset.maxSamples)
+    }
+
+    /// The evicted samples are the only signal the manager has for deleting
+    /// their thumbnails. If this returned nothing, the thumbnail directory would
+    /// grow without bound while the dataset stayed capped.
+    @Test("passing the cap returns the dropped sample so its thumbnail can be released")
+    func evictionReportsDroppedSample() {
+        var dataset = TrainingDataset()
+        for _ in 0..<TrainingDataset.maxSamples { dataset.addSample(sample()) }
+
+        let oldest = dataset.samples[0].id
+        let evicted = dataset.addSample(sample())
+
+        #expect(evicted.map(\.id) == [oldest])
+        #expect(dataset.samples.count == TrainingDataset.maxSamples)
+        #expect(!dataset.samples.contains { $0.id == oldest })
     }
 }
 
