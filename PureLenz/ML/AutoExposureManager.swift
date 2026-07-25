@@ -230,7 +230,7 @@ class AutoExposureManager {
         label: String
     ) -> (iso: Float, shutterSeconds: Double)? {
         state = .inferring
-        let startTime = Date()
+        let start = ContinuousClock.now
 
         // 1. Extract features
         guard let features = featureExtractor.extract(
@@ -250,9 +250,9 @@ class AutoExposureManager {
                 shutterModel: shutterModel
             )
 
-            let elapsed = Date().timeIntervalSince(startTime) * 1000
+            let elapsed = start.duration(to: .now)
             Logger.ml.info("""
-                \(label) ML inference completed in \(String(format: "%.1f", elapsed))ms: \
+                \(label) ML inference completed in \(elapsed.formatted(.units(allowed: [.milliseconds], width: .abbreviated, fractionalPart: .show(length: 1)))): \
                 ISO \(Int(prediction.iso)), shutter 1/\(Int(1.0 / prediction.shutterSeconds))
                 """)
 
