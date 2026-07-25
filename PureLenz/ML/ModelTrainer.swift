@@ -92,7 +92,7 @@ class ModelTrainer {
     /// Train synchronously (called on a background queue by `train`). Throws on
     /// any failure so the caller can report it.
     private func performTraining() throws {
-        let startTime = Date()
+        let start = ContinuousClock.now
         let samples = dataManager.dataset.samples
         Logger.ml.info("Training on \(samples.count) samples")
 
@@ -131,7 +131,7 @@ class ModelTrainer {
         try FileManager.default.copyItem(at: compiledISOURL, to: MLFiles.isoModelURL)
         try FileManager.default.copyItem(at: compiledShutterURL, to: MLFiles.shutterModelURL)
 
-        let elapsed = Date().timeIntervalSince(startTime)
-        Logger.ml.info("Model training completed in \(String(format: "%.1f", elapsed))s")
+        let elapsed = start.duration(to: .now)
+        Logger.ml.info("Model training completed in \(elapsed.formatted(.units(allowed: [.seconds], width: .abbreviated, fractionalPart: .show(length: 1))))")
     }
 }

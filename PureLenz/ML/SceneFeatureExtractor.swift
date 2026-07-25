@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import CoreImage
+import CoreImage.CIFilterBuiltins
 import CoreVideo
 import Accelerate
 import UIKit
@@ -55,7 +56,7 @@ class SceneFeatureExtractor {
             return nil
         }
 
-        let startTime = Date()
+        let start = ContinuousClock.now
 
         // 1. Downsample image
         let downsampled = downsample(ciImage, toFit: analysisSize)
@@ -108,8 +109,8 @@ class SceneFeatureExtractor {
             timestamp: Date()
         )
 
-        let elapsed = Date().timeIntervalSince(startTime) * 1000
-        Logger.ml.debug("Feature extraction: \(String(format: "%.1f", elapsed))ms")
+        let elapsed = start.duration(to: .now)
+        Logger.ml.debug("Feature extraction: \(elapsed.formatted(.units(allowed: [.milliseconds], width: .abbreviated, fractionalPart: .show(length: 1))))")
 
         return features
     }
@@ -128,14 +129,15 @@ class SceneFeatureExtractor {
     /// generally not square and cannot be reconstructed from its count.
     private func extractLuminance(from image: CIImage) -> (values: [Float], width: Int, height: Int)? {
         // Convert to grayscale using Rec. 709: Y = 0.2126R + 0.7152G + 0.0722B
-        let grayscale = image.applyingFilter("CIColorMatrix", parameters: [
-            "inputRVector": lumaVector,
-            "inputGVector": lumaVector,
-            "inputBVector": lumaVector,
-            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)
-        ])
+        let grayscaleFilter = CIFilter.colorMatrix()
+        grayscaleFilter.inputImage = image
+        grayscaleFilter.rVector = lumaVector
+        grayscaleFilter.gVector = lumaVector
+        grayscaleFilter.bVector = lumaVector
+        grayscaleFilter.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
 
-        guard let cgImage = context.createCGImage(grayscale, from: grayscale.extent),
+        guard let grayscale = grayscaleFilter.outputImage,
+              let cgImage = context.createCGImage(grayscale, from: grayscale.extent),
               let data = cgImage.dataProvider?.data,
               let bytes = CFDataGetBytePtr(data) else {
             return nil
