@@ -273,3 +273,40 @@ struct CenterWeightedMeteringTests {
         #expect(abs(features.centerWeightedLuminance - features.meanLuminance) < 0.001)
     }
 }
+
+@Suite("Rec. 709 luminance weighting")
+struct LuminanceWeightingTests {
+    private func meanLuminance(ofSolid colour: CIColor) throws -> Float {
+        let frame = CIImage(color: colour)
+            .cropped(to: CGRect(x: 0, y: 0, width: 256, height: 192))
+        let features = try #require(
+            SceneFeatureExtractor().extract(
+                from: frame, frameISO: 100, frameShutterSeconds: 1.0 / 60.0
+            )
+        )
+        return features.meanLuminance
+    }
+
+    /// Pins the Rec. 709 coefficients in `lumaVector`, and that they reach the
+    /// output channel the extractor actually reads. Getting either wrong skews
+    /// every luminance statistic feeding the ML models, silently.
+    ///
+    /// No other test can catch it. The rest of the extractor suite meters grey
+    /// frames, and grey is invariant to how the R/G/B weights are distributed —
+    /// permute the coefficients and a grey frame reports exactly the same
+    /// value. Verified: with `lumaVector` deliberately permuted, all 18 other
+    /// tests still pass and only this one fails.
+    ///
+    /// Rec. 709 weights green (0.7152) well above red (0.2126) and red above
+    /// blue (0.0722). Comparing the primaries pins that ordering without
+    /// depending on the exact values colour management happens to produce.
+    @Test("green reads brighter than red, and red brighter than blue")
+    func primariesFollowRec709Ordering() throws {
+        let red = try meanLuminance(ofSolid: CIColor(red: 1, green: 0, blue: 0))
+        let green = try meanLuminance(ofSolid: CIColor(red: 0, green: 1, blue: 0))
+        let blue = try meanLuminance(ofSolid: CIColor(red: 0, green: 0, blue: 1))
+
+        #expect(green > red)
+        #expect(red > blue)
+    }
+}
