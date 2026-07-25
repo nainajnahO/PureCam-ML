@@ -40,8 +40,9 @@ class ExposureControlViewModel {
     /// Active control (ISO or shutter)
     private(set) var activeControl: ExposureControl? = nil
 
-    /// Velocity tracking for shutter rumble intensity
-    private var lastDragTime: Date = .distantPast
+    /// Velocity tracking for shutter rumble intensity.
+    /// `nil` means no shutter drag is in progress.
+    private var lastDragTime: ContinuousClock.Instant?
     private var lastDragAngle: Double = 0.0
 
     // MARK: - Initialization
@@ -85,14 +86,10 @@ class ExposureControlViewModel {
     ///   - normalizedAngle: Angle in degrees (0-360) for velocity tracking
     func updateShutter(progress: Double, normalizedAngle: Double) {
         // Start rumble on first drag
-        if lastDragTime == .distantPast {
-            hapticManager.startShutterRumble()
-            lastDragTime = Date()
-            lastDragAngle = normalizedAngle
-        } else {
+        if let previousDragTime = lastDragTime {
             // Calculate velocity for rumble intensity
-            let now = Date()
-            let timeDelta = now.timeIntervalSince(lastDragTime)
+            let now = ContinuousClock.now
+            let timeDelta = previousDragTime.duration(to: now) / .seconds(1)
 
             // Handle angle wraparound (360° → 0° or 0° → 360°)
             var angleDelta = normalizedAngle - lastDragAngle
@@ -111,6 +108,10 @@ class ExposureControlViewModel {
 
             // Update tracking variables
             lastDragTime = now
+            lastDragAngle = normalizedAngle
+        } else {
+            hapticManager.startShutterRumble()
+            lastDragTime = ContinuousClock.now
             lastDragAngle = normalizedAngle
         }
 
@@ -152,7 +153,7 @@ class ExposureControlViewModel {
         // Stop rumble if we were adjusting shutter
         if activeControl == .shutter {
             hapticManager.stopShutterRumble()
-            lastDragTime = .distantPast
+            lastDragTime = nil
             lastDragAngle = 0.0
         }
 
