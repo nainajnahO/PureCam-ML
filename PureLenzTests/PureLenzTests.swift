@@ -166,12 +166,55 @@ struct DataFrameBuilderTests {
         #expect(df["targetLogShutter", Double.self][0] == -8.0)  // log2(1/256)
     }
 
-    @Test("training columns and inference features come from one schema table")
-    func trainingColumnsMatchInferenceFeatures() throws {
+    /// Both the training columns and the inference keys are generated from
+    /// `SceneFeatures.mlFeatures`, so comparing them to each other can only
+    /// ever pass. What this *does* pin is that every entry survives the trip
+    /// through `MLDictionaryFeatureProvider` — a value it refused to box would
+    /// go missing here.
+    @Test("every schema column survives conversion to an ML feature provider")
+    func everyColumnSurvivesProviderConversion() throws {
         let df = DataFrameBuilder.createISODataFrame(samples: samples)
         let provider = try samples[0].features.toMLFeatureProvider()
         let featureColumns = Set(df.columns.map(\.name)).subtracting(["targetLogISO"])
         #expect(featureColumns == Set(provider.featureNames))
+    }
+
+    /// The drift the shared table cannot prevent: adding a `Float` to
+    /// `SceneFeatures` and forgetting its row. The feature would then be
+    /// silently absent from both training and inference — no crash, no error,
+    /// it simply never reaches the model. Reflection catches it because it sees
+    /// the struct's real stored properties rather than the table's view of them.
+    @Test("every Float feature on SceneFeatures has a row in the ML schema table")
+    func schemaTableCoversEveryFloatProperty() {
+        let declaredFloats = Mirror(reflecting: samples[0].features).children
+            .compactMap { $0.value is Float ? $0.label : nil }
+
+        #expect(Set(declaredFloats) == Set(SceneFeatures.mlFeatures.map(\.name)))
+    }
+
+    /// Column names are part of the on-disk contract with an already-trained
+    /// model: renaming one without bumping the `MLFiles` suffix would leave a
+    /// model being fed a column it never saw during training. Spelling the
+    /// expected schema out here makes that rename fail a test rather than
+    /// surface as a prediction error after the next training run.
+    @Test("the ML schema is exactly the fourteen expected columns, in order")
+    func schemaTableMatchesExpectedNames() {
+        #expect(SceneFeatures.mlFeatures.map(\.name) == [
+            "meanLuminance",
+            "medianLuminance",
+            "minLuminance",
+            "maxLuminance",
+            "stdDevLuminance",
+            "shadowsPercent",
+            "midtonesPercent",
+            "highlightsPercent",
+            "clippedHighlightsPercent",
+            "clippedShadowsPercent",
+            "colorTemperature",
+            "saturation",
+            "centerWeightedLuminance",
+            "sceneLightLevel"
+        ])
     }
 }
 

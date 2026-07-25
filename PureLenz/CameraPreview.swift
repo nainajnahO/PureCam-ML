@@ -82,8 +82,11 @@ struct CameraPreview: UIViewRepresentable {
     }
 
     private func updateRotation(for layer: AVCaptureVideoPreviewLayer) {
-        // The app is locked to portrait (see AppDelegate), so the preview is
-        // always portrait — 90°. Capture orientation is handled separately by
+        // The app is iPhone-only and locked to portrait by the target's
+        // supported-interface-orientations setting, so the preview is always
+        // portrait — 90°. That build setting is what makes this constant safe;
+        // supporting a rotating screen would mean driving this from the
+        // interface orientation. Capture orientation is handled separately by
         // AVCaptureDevice.RotationCoordinator in CameraService.
         let angle: CGFloat = 90
 

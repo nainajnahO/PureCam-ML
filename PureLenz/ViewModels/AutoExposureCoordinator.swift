@@ -52,6 +52,11 @@ class AutoExposureCoordinator: NSObject {
     private var rampStartShutter: Double = 0
     private var rampTargetShutter: Double = 0
 
+    /// The pending camera-warmup delay before startup inference; stored so a
+    /// second `.active` (a Control Center swipe, a notification banner) cancels
+    /// the previous one instead of queueing a redundant frame capture.
+    private var startupInferenceTask: Task<Void, Never>?
+
     // MARK: - Initialization
 
     init(
@@ -67,23 +72,32 @@ class AutoExposureCoordinator: NSObject {
 
     deinit {
         exposureRampLink?.invalidate()
+        startupInferenceTask?.cancel()
     }
 
     // MARK: - Public Methods
 
     /// Handle scene phase changes. The ML session lifecycle is owned here:
     /// becoming active resets the per-session inference state and schedules the
-    /// one-shot startup inference after a short camera warmup. The manager's
-    /// own `hasRunStartupInference` keeps it one-shot, so no second flag is
-    /// needed at this level.
+    /// one-shot startup inference after a short camera warmup.
+    ///
+    /// Inference runs at most once per active session: this type is main-actor
+    /// isolated (the target builds with `SWIFT_DEFAULT_ACTOR_ISOLATION =
+    /// MainActor`), so `runStartupInference`'s check of `hasRunStartupInference`
+    /// and its later set of it cannot interleave with another call. Cancelling
+    /// the pending delay below is therefore about not doing redundant work —
+    /// each stale task would still wake up and capture a frame before
+    /// discovering it had nothing to do.
     func handleScenePhaseChange(_ newPhase: ScenePhase) {
+        startupInferenceTask?.cancel()
         guard newPhase == .active else { return }
         autoExposureManager.resetForNewSession()
 
-        Task { [weak self] in
+        startupInferenceTask = Task { [weak self] in
             // Short delay for camera warmup before the startup inference.
             try? await Task.sleep(for: .seconds(1))
-            await MainActor.run { self?.triggerStartupInferenceIfReady() }
+            guard !Task.isCancelled else { return }
+            self?.triggerStartupInferenceIfReady()
         }
     }
 

@@ -25,6 +25,7 @@ class AutoExposureManager {
 
     enum State: Equatable {
         case disabled              // Not enough training data, no model available
+        case loading               // Models exist on disk, being loaded
         case ready                 // Model loaded, waiting for startup
         case inferring             // Running inference
         case applied               // AI exposure applied successfully
@@ -62,6 +63,14 @@ class AutoExposureManager {
         self.trainer = ModelTrainer(dataManager: dataManager)
         loadModel()
 
+        // Reclaim space from earlier schema versions. Housekeeping only — the
+        // versioned filenames are what make stale artifacts safe — so it runs
+        // off-main and never blocks startup. It only ever deletes names that
+        // are not the current ones, so it cannot race the load above.
+        DispatchQueue.global(qos: .utility).async {
+            MLFiles.removeSupersededArtifacts()
+        }
+
         // Reload the model whenever a training run finishes successfully.
         NotificationCenter.default.addObserver(
             forName: .mlModelUpdated,
@@ -95,33 +104,50 @@ class AutoExposureManager {
 
     // MARK: - Model Management
 
-    /// Load (or reload) both compiled models. The file checks and MLModel
-    /// loading run on a background queue — at launch this keeps the first
-    /// frame from waiting on disk I/O — and the result is applied back on
-    /// main. Until it lands, `state` stays `.disabled` and inference reports
-    /// not ready (the startup-inference path falls back to iOS auto).
+    /// Load (or reload) both compiled models.
+    ///
+    /// The existence check stays synchronous — it is two `stat` calls, and it
+    /// decides between two states that mean very different things: `.disabled`
+    /// is "no model has ever been trained, so record what the user shoots",
+    /// while `.loading` is "a trained model is on its way". Leaving `state` at
+    /// `.disabled` while a trained model loaded would make a capture in that
+    /// window record a sample labelled with iOS auto-exposure rather than a
+    /// user preference.
+    ///
+    /// Only the expensive part — constructing the two `MLModel`s — goes to a
+    /// background queue, so the first frame never waits on it. Until that
+    /// lands, `.loading` reports not-ready to both inference paths and is
+    /// excluded from `wantsTrainingSample`.
     private func loadModel() {
+        let isoURL = MLFiles.isoModelURL
+        let shutterURL = MLFiles.shutterModelURL
+
+        guard FileManager.default.fileExists(atPath: isoURL.path),
+              FileManager.default.fileExists(atPath: shutterURL.path) else {
+            isoModel = nil
+            shutterModel = nil
+            state = .disabled
+            Logger.ml.info("No ML models found - will use iOS auto until trained")
+            return
+        }
+
+        state = .loading
+
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let newState: State
             var models: (iso: MLModel, shutter: MLModel)?
-            if FileManager.default.fileExists(atPath: MLFiles.isoModelURL.path),
-               FileManager.default.fileExists(atPath: MLFiles.shutterModelURL.path) {
-                do {
-                    let config = MLModelConfiguration()
-                    config.computeUnits = .cpuAndNeuralEngine
-                    models = (
-                        iso: try MLModel(contentsOf: MLFiles.isoModelURL, configuration: config),
-                        shutter: try MLModel(contentsOf: MLFiles.shutterModelURL, configuration: config)
-                    )
-                    newState = .ready
-                    Logger.ml.info("Both ML models loaded successfully (sequential prediction)")
-                } catch {
-                    newState = .error("Failed to load models: \(error.localizedDescription)")
-                    Logger.ml.error("Model load error: \(error.localizedDescription)")
-                }
-            } else {
-                newState = .disabled
-                Logger.ml.info("No ML models found - will use iOS auto until trained")
+            do {
+                let config = MLModelConfiguration()
+                config.computeUnits = .cpuAndNeuralEngine
+                models = (
+                    iso: try MLModel(contentsOf: isoURL, configuration: config),
+                    shutter: try MLModel(contentsOf: shutterURL, configuration: config)
+                )
+                newState = .ready
+                Logger.ml.info("Both ML models loaded successfully (sequential prediction)")
+            } catch {
+                newState = .error("Failed to load models: \(error.localizedDescription)")
+                Logger.ml.error("Model load error: \(error.localizedDescription)")
             }
 
             DispatchQueue.main.async {
@@ -171,10 +197,13 @@ class AutoExposureManager {
             return nil
         }
 
-        // Allow manual inference unless disabled or already inferring
+        // Allow manual inference unless disabled, still loading, or already inferring
         switch state {
         case .disabled:
             Logger.ml.debug("Cannot run inference - no models trained yet")
+            return nil
+        case .loading:
+            Logger.ml.debug("Cannot run inference - models still loading")
             return nil
         case .error(let message):
             Logger.ml.error("Cannot run inference - error state: \(message)")

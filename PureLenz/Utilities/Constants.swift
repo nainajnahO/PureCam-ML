@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import Foundation
+import OSLog
 
 /// Manual-exposure policy caps. Applied once, in CameraService's session
 /// configuration, on top of the device-reported exposure range — the clamped
@@ -39,7 +40,9 @@ enum CameraConstants {
 /// the feature set, to what a feature means, or to the target space makes
 /// previously recorded samples and previously trained models incompatible.
 /// Bump the suffix on all three names and the stale files are simply never
-/// read again — no per-version cleanup code to carry forward.
+/// read again — the rename, not a delete, is what makes them safe.
+/// `removeSupersededArtifacts()` then reclaims the space without needing to
+/// know which versions ever existed.
 enum MLFiles {
     /// Compiled ISO regressor installed in the Documents directory.
     static var isoModelURL: URL {
@@ -54,6 +57,51 @@ enum MLFiles {
     /// Recorded training samples.
     static var trainingDataURL: URL {
         URL.documentsDirectory.appendingPathComponent("trainingDataV3.json")
+    }
+
+    /// The name stem and extension of each artifact family, used to recognise
+    /// versioned files from *any* schema generation.
+    private static let artifactPatterns: [(stem: String, fileExtension: String)] = [
+        ("ISORegressor", "mlmodelc"),
+        ("ShutterRegressor", "mlmodelc"),
+        ("trainingData", "json")
+    ]
+
+    /// Delete artifacts left behind by earlier schema versions.
+    ///
+    /// Matched by pattern rather than by a list of old filenames, so bumping the
+    /// suffix above needs no corresponding edit here — anything that looks like
+    /// one of our artifacts but isn't a current name is by definition stale.
+    /// These live in Documents, which is iCloud-backed and counts against the
+    /// user's storage, so leaving a set behind per schema bump isn't free.
+    ///
+    /// Purely housekeeping: correctness comes from the versioned names, so a
+    /// failure to delete is logged and ignored.
+    static func removeSupersededArtifacts() {
+        let currentNames = Set(
+            [isoModelURL, shutterModelURL, trainingDataURL].map(\.lastPathComponent)
+        )
+
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: .documentsDirectory, includingPropertiesForKeys: nil
+        ) else { return }
+
+        for url in contents where !currentNames.contains(url.lastPathComponent) {
+            let name = url.deletingPathExtension().lastPathComponent
+            let matchesArtifact = artifactPatterns.contains {
+                name.hasPrefix($0.stem) && url.pathExtension == $0.fileExtension
+            }
+            guard matchesArtifact else { continue }
+
+            do {
+                try FileManager.default.removeItem(at: url)
+                Logger.ml.info("Removed superseded ML artifact \(url.lastPathComponent)")
+            } catch {
+                Logger.ml.error(
+                    "Could not remove superseded artifact \(url.lastPathComponent): \(error.localizedDescription)"
+                )
+            }
+        }
     }
 }
 

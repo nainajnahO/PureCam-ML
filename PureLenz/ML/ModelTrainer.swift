@@ -31,10 +31,15 @@ class ModelTrainer {
 
     private let dataManager: TrainingDataManager
 
-    // Single-flight guard; the capture and battery triggers arrive on
-    // different threads.
-    private let lock = NSLock()
-    private var isTraining = false
+    // Single-flight guard, deliberately process-wide rather than per-instance:
+    // the model filenames written by `performTraining` are fixed, so two
+    // concurrent runs collide on them no matter which trainer started them.
+    // Scoping this to the instance would make correctness depend on there being
+    // exactly one trainer alive, which nothing enforces — `CameraScene` is built
+    // from a `@State` default value, and that expression is re-evaluated on
+    // every enclosing view initialization.
+    private static let lock = NSLock()
+    private static var isTraining = false
 
     init(dataManager: TrainingDataManager) {
         self.dataManager = dataManager
@@ -46,14 +51,14 @@ class ModelTrainer {
     /// The work is wrapped in a background-time assertion so a foreground-initiated
     /// run still finishes (~10s) if the user backgrounds the app mid-train.
     func train() {
-        lock.lock()
-        if isTraining {
-            lock.unlock()
+        Self.lock.lock()
+        if Self.isTraining {
+            Self.lock.unlock()
             Logger.ml.info("Training already in progress — ignoring duplicate request")
             return
         }
-        isTraining = true
-        lock.unlock()
+        Self.isTraining = true
+        Self.lock.unlock()
 
         // Background-time assertion so the run survives a mid-train backgrounding.
         var bgTask: UIBackgroundTaskIdentifier = .invalid
@@ -65,9 +70,9 @@ class ModelTrainer {
         DispatchQueue.global(qos: .utility).async { [self] in
             let result = Result { try performTraining() }
 
-            lock.lock()
-            isTraining = false
-            lock.unlock()
+            Self.lock.lock()
+            Self.isTraining = false
+            Self.lock.unlock()
 
             DispatchQueue.main.async {
                 switch result {

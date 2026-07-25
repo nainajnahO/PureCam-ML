@@ -33,14 +33,29 @@ final class HapticManager {
 
     private var isRumbling = false
 
-    /// Prepared one-shot impact generators shared by every view. A generator
-    /// created fresh at tap time has documented first-fire latency; these stay
-    /// alive and ready.
-    private let impactGenerators: [UIImpactFeedbackGenerator.FeedbackStyle: UIImpactFeedbackGenerator] = [
-        .light: UIImpactFeedbackGenerator(style: .light),
-        .medium: UIImpactFeedbackGenerator(style: .medium),
-        .heavy: UIImpactFeedbackGenerator(style: .heavy)
-    ]
+    /// The one-shot impact strengths this app uses. A dedicated enum rather
+    /// than `UIImpactFeedbackGenerator.FeedbackStyle`, so a call site can only
+    /// name a strength that is actually wired up — the wider UIKit type has
+    /// styles (`.soft`, `.rigid`) that would otherwise be accepted and then
+    /// silently do nothing.
+    enum Impact {
+        case light, medium, heavy
+    }
+
+    // Long-lived generators, shared by every view: creating one at tap time
+    // both allocates and starts cold. Keeping them alive covers the allocation;
+    // `prepare()` (see `prepare(_:)` and `impact(_:)`) covers the cold start.
+    private let lightGenerator = UIImpactFeedbackGenerator(style: .light)
+    private let mediumGenerator = UIImpactFeedbackGenerator(style: .medium)
+    private let heavyGenerator = UIImpactFeedbackGenerator(style: .heavy)
+
+    private func generator(for impact: Impact) -> UIImpactFeedbackGenerator {
+        switch impact {
+        case .light: lightGenerator
+        case .medium: mediumGenerator
+        case .heavy: heavyGenerator
+        }
+    }
 
     init() {
         prepareHaptics()
@@ -48,10 +63,24 @@ final class HapticManager {
 
     // MARK: - One-Shot Impacts
 
+    /// Warm the Taptic Engine for an impact that is about to happen.
+    ///
+    /// Worth calling when a gesture *begins* and the feedback comes later — a
+    /// long press, say, whose `.heavy` fires half a second after touch-down.
+    /// The readiness this buys expires after a short idle, which is why it is
+    /// renewed per gesture rather than once at init.
+    func prepare(_ impact: Impact) {
+        generator(for: impact).prepare()
+    }
+
     /// Play a one-shot impact (button taps, gesture feedback).
-    /// Supported styles: `.light`, `.medium`, `.heavy`.
-    func impact(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
-        impactGenerators[style]?.impactOccurred()
+    func impact(_ impact: Impact) {
+        let generator = generator(for: impact)
+        generator.impactOccurred()
+        // Leave the engine warm: these fire in sequences (tap, then another
+        // tap; press, then release), and re-preparing here keeps the follow-up
+        // from paying the cold-start latency again.
+        generator.prepare()
     }
 
     // MARK: - Setup

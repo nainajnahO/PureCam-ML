@@ -95,6 +95,10 @@ struct ButtonUILayer: View {
                 if isPressing {
                     // Press started — immediate feedback.
                     haptics.impact(.medium)
+                    // Whichever way this gesture resolves, the next impact is
+                    // ~0.5s away; warm its generator now so it fires promptly.
+                    haptics.prepare(.heavy)
+                    haptics.prepare(.light)
                 } else {
                     // Released before the long-press threshold — treat as a tap.
                     guard !isBusy else { return }

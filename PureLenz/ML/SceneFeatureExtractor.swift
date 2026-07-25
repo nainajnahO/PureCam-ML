@@ -256,6 +256,12 @@ class SceneFeatureExtractor {
         let width = Int(smallImage.extent.width.rounded())
         let height = Int(smallImage.extent.height.rounded())
 
+        // The two reachable failures are a degenerate extent and a missing
+        // colour space; both are caught here. `render(toBitmap:)` itself
+        // reports nothing, but for an integral-extent image with a valid colour
+        // space it has no failure mode to report — and its worst case, an
+        // untouched buffer, reads as a pure-black frame, which is a legitimate
+        // input producing these same values anyway.
         guard width > 0, height > 0,
               let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
             return (5500, 0.5) // Fallback to neutral values

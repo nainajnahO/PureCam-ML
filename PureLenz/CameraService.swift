@@ -256,7 +256,11 @@ class CameraService: NSObject {
                 $0 >= activeFormat.minISO && $0 <= activeFormat.maxISO
             }
             if !detents.isEmpty {
-                self.isoDetents = detents
+                // Published on main like `status` below: this runs on
+                // sessionQueue, and the drag gesture reads `isoDetents` on the
+                // main thread. Swapping an array out from under a concurrent
+                // read is a use-after-free, not just a stale value.
+                DispatchQueue.main.async { self.isoDetents = detents }
             }
             
             // Initialize current values
