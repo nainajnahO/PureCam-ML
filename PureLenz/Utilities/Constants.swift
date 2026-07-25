@@ -15,36 +15,92 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import Foundation
+import OSLog
 
-/// Camera hardware limits shared across exposure math.
+/// Manual-exposure policy caps. Applied once, in CameraService's session
+/// configuration, on top of the device-reported exposure range — the clamped
+/// range is then the single source that the knob mapping, the AI ramp, and
+/// setCustomExposure all read.
 enum CameraConstants {
-    /// Fastest shutter speed supported by typical iPhone hardware (1/4000 s).
-    static let hardwareMinShutter: Double = 1.0 / 4000.0
+    /// Fastest shutter speed exposed to manual control (1/4000 s).
+    static let fastestManualShutter: Double = 1.0 / 4000.0
 
-    /// Slowest shutter speed exposed to manual control (1/2 s).
-    static let hardwareMaxShutter: Double = 1.0 / 2.0
+    /// Slowest shutter speed exposed to manual control (1/2 s) — a UX cap,
+    /// not a hardware limit; longer exposures aren't practical handheld.
+    static let slowestManualShutter: Double = 1.0 / 2.0
 }
 
-/// On-device trained CoreML model files, shared by ModelTrainer (writer) and
-/// AutoExposureManager (reader) so the two can never disagree on names.
-/// The V2 suffix marks the log2-target schema; bumping the version means
-/// renaming here and moving the old names into `legacyModelURLs` so stale
-/// models are cleaned up at launch.
-enum MLModelFiles {
+/// On-device ML artifacts: the two trained model files and the recorded
+/// training dataset. Named in one place so the writer (ModelTrainer), the
+/// reader (AutoExposureManager), and the recorder (TrainingDataManager) can
+/// never disagree — and so a schema bump touches all three together.
+///
+/// The V3 suffix marks the current schema: 14 features (including a true
+/// Gaussian center-weighted luminance) with log2-space targets. Any change to
+/// the feature set, to what a feature means, or to the target space makes
+/// previously recorded samples and previously trained models incompatible.
+/// Bump the suffix on all three names and the stale files are simply never
+/// read again — the rename, not a delete, is what makes them safe.
+/// `removeSupersededArtifacts()` then reclaims the space without needing to
+/// know which versions ever existed.
+enum MLFiles {
     /// Compiled ISO regressor installed in the Documents directory.
     static var isoModelURL: URL {
-        URL.documentsDirectory.appendingPathComponent("ISORegressorV2.mlmodelc")
+        URL.documentsDirectory.appendingPathComponent("ISORegressorV3.mlmodelc")
     }
 
     /// Compiled shutter regressor installed in the Documents directory.
     static var shutterModelURL: URL {
-        URL.documentsDirectory.appendingPathComponent("ShutterRegressorV2.mlmodelc")
+        URL.documentsDirectory.appendingPathComponent("ShutterRegressorV3.mlmodelc")
     }
 
-    /// Superseded model files (raw-linear V1 targets), deleted at launch.
-    static var legacyModelURLs: [URL] {
-        ["ISORegressor.mlmodelc", "ShutterRegressor.mlmodelc"].map {
-            URL.documentsDirectory.appendingPathComponent($0)
+    /// Recorded training samples.
+    static var trainingDataURL: URL {
+        URL.documentsDirectory.appendingPathComponent("trainingDataV3.json")
+    }
+
+    /// The name stem and extension of each artifact family, used to recognise
+    /// versioned files from *any* schema generation.
+    private static let artifactPatterns: [(stem: String, fileExtension: String)] = [
+        ("ISORegressor", "mlmodelc"),
+        ("ShutterRegressor", "mlmodelc"),
+        ("trainingData", "json")
+    ]
+
+    /// Delete artifacts left behind by earlier schema versions.
+    ///
+    /// Matched by pattern rather than by a list of old filenames, so bumping the
+    /// suffix above needs no corresponding edit here — anything that looks like
+    /// one of our artifacts but isn't a current name is by definition stale.
+    /// These live in Documents, which is iCloud-backed and counts against the
+    /// user's storage, so leaving a set behind per schema bump isn't free.
+    ///
+    /// Purely housekeeping: correctness comes from the versioned names, so a
+    /// failure to delete is logged and ignored.
+    static func removeSupersededArtifacts() {
+        let currentNames = Set(
+            [isoModelURL, shutterModelURL, trainingDataURL].map(\.lastPathComponent)
+        )
+
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: .documentsDirectory, includingPropertiesForKeys: nil
+        ) else { return }
+
+        for url in contents where !currentNames.contains(url.lastPathComponent) {
+            let name = url.deletingPathExtension().lastPathComponent
+            let matchesArtifact = artifactPatterns.contains {
+                name.hasPrefix($0.stem) && url.pathExtension == $0.fileExtension
+            }
+            guard matchesArtifact else { continue }
+
+            do {
+                try FileManager.default.removeItem(at: url)
+                Logger.ml.info("Removed superseded ML artifact \(url.lastPathComponent)")
+            } catch {
+                Logger.ml.error(
+                    "Could not remove superseded artifact \(url.lastPathComponent): \(error.localizedDescription)"
+                )
+            }
         }
     }
 }

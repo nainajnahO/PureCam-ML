@@ -28,8 +28,16 @@ class SceneFeatureExtractor {
     /// Shared, GPU-backed context (creating a CIContext per extractor is costly).
     private let context = CIContext.shared
 
-    // Optimization: Downsample to 256x256 for analysis (reduces 12MP to 65K pixels)
-    private let targetSize = CGSize(width: 256, height: 256)
+    /// Long edge of the luminance analysis buffer (reduces 12MP to ~50K pixels).
+    private let analysisSize: CGFloat = 256
+
+    /// Rec. 709 luma coefficients for the grayscale conversion.
+    private let lumaVector = CIVector(
+        x: CGFloat(LuminanceConstants.rec709Red),
+        y: CGFloat(LuminanceConstants.rec709Green),
+        z: CGFloat(LuminanceConstants.rec709Blue),
+        w: 0
+    )
 
     // MARK: - Public Methods
 
@@ -50,27 +58,32 @@ class SceneFeatureExtractor {
         let startTime = Date()
 
         // 1. Downsample image
-        let downsampled = downsample(ciImage)
+        let downsampled = downsample(ciImage, toFit: analysisSize)
 
-        // 2. Convert to luminance buffer
-        guard let luminanceBuffer = extractLuminance(from: downsampled) else {
+        // 2. Convert to luminance buffer (dimensions carried alongside — the
+        //    center-weighted metering needs the real shape, not a guess).
+        guard let luminance = extractLuminance(from: downsampled) else {
             Logger.ml.error("Failed to extract luminance")
             return nil
         }
 
-        // 3. Compute statistics using Accelerate
-        let stats = computeStatistics(luminanceBuffer: luminanceBuffer)
+        // 3. One byte-quantized histogram feeds both the median and the tonal
+        //    bins; vDSP covers the rest of the statistics.
+        let bins = quantizedHistogram(luminance.values)
+        let stats = computeStatistics(luminanceBuffer: luminance.values, histogram: bins)
+        let histogram = computeHistogram(histogram: bins, totalPixels: luminance.values.count)
 
-        // 4. Compute histogram
-        let histogram = computeHistogram(luminanceBuffer: luminanceBuffer)
-
-        // 5. Extract color info
+        // 4. Extract color info
         let colorInfo = extractColorInfo(from: downsampled)
 
-        // 6. Compute center-weighted luminance
-        let centerWeighted = computeCenterWeightedLuminance(luminanceBuffer: luminanceBuffer)
+        // 5. Compute center-weighted luminance
+        let centerWeighted = computeCenterWeightedLuminance(
+            luminanceBuffer: luminance.values,
+            width: luminance.width,
+            height: luminance.height
+        )
 
-        // 7. Normalize brightness by the frame's exposure to get absolute scene light
+        // 6. Normalize brightness by the frame's exposure to get absolute scene light
         let sceneLight = SceneFeatures.computeSceneLightLevel(
             meanLuminance: stats.mean,
             iso: frameISO,
@@ -103,38 +116,27 @@ class SceneFeatureExtractor {
 
     // MARK: - Private Helpers
 
-    /// Downsample image to target size for efficient processing
-    private func downsample(_ image: CIImage) -> CIImage {
-        let scaleX = targetSize.width / image.extent.width
-        let scaleY = targetSize.height / image.extent.height
-        let scale = min(scaleX, scaleY)
-
+    /// Downsample image so its long edge fits `target`, preserving aspect ratio.
+    private func downsample(_ image: CIImage, toFit target: CGFloat) -> CIImage {
+        let scale = min(target / image.extent.width, target / image.extent.height)
         return image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
     }
 
-    /// Extract luminance values as Float array using Rec. 709 coefficients
-    private func extractLuminance(from image: CIImage) -> [Float]? {
+    /// Extract luminance values as a Float array using Rec. 709 coefficients,
+    /// with the buffer's real dimensions. The shape is returned rather than
+    /// inferred later: `downsample` preserves aspect ratio, so the buffer is
+    /// generally not square and cannot be reconstructed from its count.
+    private func extractLuminance(from image: CIImage) -> (values: [Float], width: Int, height: Int)? {
         // Convert to grayscale using Rec. 709: Y = 0.2126R + 0.7152G + 0.0722B
-        let lumaVector = CIVector(
-            x: CGFloat(LuminanceConstants.rec709Red),
-            y: CGFloat(LuminanceConstants.rec709Green),
-            z: CGFloat(LuminanceConstants.rec709Blue),
-            w: 0
-        )
-        let grayscaleFilter = CIFilter(name: "CIColorMatrix")!
-        grayscaleFilter.setValue(image, forKey: kCIInputImageKey)
-        grayscaleFilter.setValue(lumaVector, forKey: "inputRVector")
-        grayscaleFilter.setValue(lumaVector, forKey: "inputGVector")
-        grayscaleFilter.setValue(lumaVector, forKey: "inputBVector")
-        grayscaleFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+        let grayscale = image.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": lumaVector,
+            "inputGVector": lumaVector,
+            "inputBVector": lumaVector,
+            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)
+        ])
 
-        guard let outputImage = grayscaleFilter.outputImage,
-              let cgImage = context.createCGImage(outputImage, from: outputImage.extent) else {
-            return nil
-        }
-
-        // Extract pixel data
-        guard let data = cgImage.dataProvider?.data,
+        guard let cgImage = context.createCGImage(grayscale, from: grayscale.extent),
+              let data = cgImage.dataProvider?.data,
               let bytes = CFDataGetBytePtr(data) else {
             return nil
         }
@@ -144,77 +146,100 @@ class SceneFeatureExtractor {
         let bytesPerRow = cgImage.bytesPerRow
         let bytesPerPixel = cgImage.bitsPerPixel / 8
 
-        var floatPixels = [Float]()
-        floatPixels.reserveCapacity(width * height)
-
-        for y in 0..<height {
-            for x in 0..<width {
-                let offset = y * bytesPerRow + x * bytesPerPixel
-                let pixel = bytes[offset]
-                floatPixels.append(Float(pixel) / 255.0)
+        // vDSP bulk-converts each row's first-channel bytes (the stride skips
+        // any other channels); one final divide normalizes to 0-1.
+        var floatPixels = [Float](repeating: 0, count: width * height)
+        floatPixels.withUnsafeMutableBufferPointer { buffer in
+            for y in 0..<height {
+                vDSP_vfltu8(
+                    bytes + y * bytesPerRow, vDSP_Stride(bytesPerPixel),
+                    buffer.baseAddress! + y * width, 1,
+                    vDSP_Length(width)
+                )
             }
         }
+        var divisor: Float = 255
+        vDSP_vsdiv(floatPixels, 1, &divisor, &floatPixels, 1, vDSP_Length(floatPixels.count))
 
-        return floatPixels
+        return (floatPixels, width, height)
+    }
+
+    /// 256-bin counting histogram of the luminance values. The buffer came from
+    /// 8-bit pixels (each value is exactly k/255), so binning by round(v·255)
+    /// is exact — it feeds both the median and the tonal-range fractions.
+    private func quantizedHistogram(_ luminanceBuffer: [Float]) -> [Int] {
+        var bins = [Int](repeating: 0, count: 256)
+        for value in luminanceBuffer {
+            bins[Int(value * 255 + 0.5)] += 1
+        }
+        return bins
     }
 
     /// Compute luminance statistics using Accelerate framework
-    private func computeStatistics(luminanceBuffer: [Float]) -> (mean: Float, median: Float, min: Float, max: Float, stdDev: Float) {
+    private func computeStatistics(
+        luminanceBuffer: [Float],
+        histogram: [Int]
+    ) -> (mean: Float, median: Float, min: Float, max: Float, stdDev: Float) {
+        let count = vDSP_Length(luminanceBuffer.count)
         var mean: Float = 0
+        var stdDev: Float = 0
         var min: Float = 1
         var max: Float = 0
 
-        // Use Accelerate for vectorized operations
-        vDSP_meanv(luminanceBuffer, 1, &mean, vDSP_Length(luminanceBuffer.count))
-        vDSP_minv(luminanceBuffer, 1, &min, vDSP_Length(luminanceBuffer.count))
-        vDSP_maxv(luminanceBuffer, 1, &max, vDSP_Length(luminanceBuffer.count))
+        vDSP_minv(luminanceBuffer, 1, &min, count)
+        vDSP_maxv(luminanceBuffer, 1, &max, count)
+        // Mean and standard deviation in a single pass (a nil output vector
+        // means "statistics only, don't normalize").
+        vDSP_normalize(luminanceBuffer, 1, nil, 1, &mean, &stdDev, count)
 
-        // Compute standard deviation
-        var variance: Float = 0
-        var meanSubtracted = [Float](repeating: 0, count: luminanceBuffer.count)
-        var negMean = -mean
-        vDSP_vsadd(luminanceBuffer, 1, &negMean, &meanSubtracted, 1, vDSP_Length(luminanceBuffer.count))
-        vDSP_measqv(meanSubtracted, 1, &variance, vDSP_Length(luminanceBuffer.count))
-        let stdDev = sqrt(variance)
-
-        // Median (requires sort)
-        let sorted = luminanceBuffer.sorted()
-        let median = sorted[sorted.count / 2]
+        // Median: the (n/2 + 1)-th smallest value read from the cumulative
+        // histogram — exact for these quantized values, no O(n log n) sort.
+        var median: Float = 0
+        var cumulative = 0
+        for (bin, binCount) in histogram.enumerated() {
+            cumulative += binCount
+            if cumulative > luminanceBuffer.count / 2 {
+                median = Float(bin) / 255
+                break
+            }
+        }
 
         return (mean, median, min, max, stdDev)
     }
 
-    /// Compute histogram distribution
-    private func computeHistogram(luminanceBuffer: [Float]) -> (
+    /// Compute the tonal distribution from the quantized histogram — same
+    /// thresholds as a per-pixel pass, applied per bin instead of per pixel.
+    private func computeHistogram(histogram: [Int], totalPixels: Int) -> (
         shadows: Float,
         midtones: Float,
         highlights: Float,
         clippedShadows: Float,
         clippedHighlights: Float
     ) {
-        let total = Float(luminanceBuffer.count)
-
         var shadows = 0
         var midtones = 0
         var highlights = 0
         var clippedShadows = 0
         var clippedHighlights = 0
 
-        for pixel in luminanceBuffer {
+        for (bin, count) in histogram.enumerated() {
+            let value = Float(bin) / 255
+
             // Clipping detection
-            if pixel < LuminanceConstants.clippedShadowsThreshold { clippedShadows += 1 }
-            if pixel > LuminanceConstants.clippedHighlightsThreshold { clippedHighlights += 1 }
+            if value < LuminanceConstants.clippedShadowsThreshold { clippedShadows += count }
+            if value > LuminanceConstants.clippedHighlightsThreshold { clippedHighlights += count }
 
             // Histogram bins
-            if pixel < LuminanceConstants.shadowsUpperBound {
-                shadows += 1
-            } else if pixel < LuminanceConstants.midtonesUpperBound {
-                midtones += 1
+            if value < LuminanceConstants.shadowsUpperBound {
+                shadows += count
+            } else if value < LuminanceConstants.midtonesUpperBound {
+                midtones += count
             } else {
-                highlights += 1
+                highlights += count
             }
         }
 
+        let total = Float(totalPixels)
         return (
             Float(shadows) / total,
             Float(midtones) / total,
@@ -224,98 +249,65 @@ class SceneFeatureExtractor {
         )
     }
 
-    /// Extract color information using RGB analysis
+    /// Extract color information (temperature and saturation) from a 32×32
+    /// downsample, rendered once and accumulated in a single pass.
     private func extractColorInfo(from image: CIImage) -> (temperature: Float, saturation: Float) {
-        // Downsample to 32x32 for fast color analysis (1024 pixels)
-        let smallImage = downsampleForColorAnalysis(image, targetSize: 32)
+        let smallImage = downsample(image, toFit: 32)
+        let width = Int(smallImage.extent.width.rounded())
+        let height = Int(smallImage.extent.height.rounded())
 
-        guard let pixelData = extractRGBPixels(from: smallImage) else {
+        // The two reachable failures are a degenerate extent and a missing
+        // colour space; both are caught here. `render(toBitmap:)` itself
+        // reports nothing, but for an integral-extent image with a valid colour
+        // space it has no failure mode to report — and its worst case, an
+        // untouched buffer, reads as a pure-black frame, which is a legitimate
+        // input producing these same values anyway.
+        guard width > 0, height > 0,
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
             return (5500, 0.5) // Fallback to neutral values
         }
 
-        // Calculate average RGB values
+        // Render RGBA bytes straight into the buffer — no intermediate CGImage
+        // or second CGContext draw.
+        var pixelData = [UInt8](repeating: 0, count: width * height * 4)
+        context.render(
+            smallImage,
+            toBitmap: &pixelData,
+            rowBytes: width * 4,
+            bounds: smallImage.extent,
+            format: .RGBA8,
+            colorSpace: colorSpace
+        )
+
+        // One pass accumulates the channel averages and the mean saturation.
+        // Saturation must be per pixel — the saturation of the average color is
+        // not the average saturation.
         var totalR: Float = 0
         var totalG: Float = 0
         var totalB: Float = 0
-
-        for pixel in pixelData {
-            totalR += pixel.r
-            totalG += pixel.g
-            totalB += pixel.b
-        }
-
-        let avgR = totalR / Float(pixelData.count)
-        let avgG = totalG / Float(pixelData.count)
-        let avgB = totalB / Float(pixelData.count)
-
-        // Estimate color temperature from RGB ratios
-        let temperature = estimateColorTemperature(r: avgR, g: avgG, b: avgB)
-
-        // Calculate average saturation via HSV conversion
         var totalSaturation: Float = 0
-        for pixel in pixelData {
-            let hsv = rgbToHSV(pixel)
-            totalSaturation += hsv.s
-        }
-        let avgSaturation = totalSaturation / Float(pixelData.count)
 
-        return (temperature, avgSaturation)
-    }
+        for offset in stride(from: 0, to: pixelData.count, by: 4) {
+            let r = Float(pixelData[offset]) / 255.0
+            let g = Float(pixelData[offset + 1]) / 255.0
+            let b = Float(pixelData[offset + 2]) / 255.0
+            totalR += r
+            totalG += g
+            totalB += b
 
-    /// Downsample image for fast color analysis
-    private func downsampleForColorAnalysis(_ image: CIImage, targetSize: Int) -> CIImage {
-        let size = CGFloat(targetSize)
-        let scaleX = size / image.extent.width
-        let scaleY = size / image.extent.height
-        let scale = min(scaleX, scaleY)
-        return image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-    }
-
-    /// Extract RGB pixel data from image
-    private func extractRGBPixels(from image: CIImage) -> [(r: Float, g: Float, b: Float)]? {
-        // Render to bitmap
-        guard let cgImage = context.createCGImage(image, from: image.extent) else {
-            return nil
+            let maxComponent = max(r, g, b)
+            let minComponent = min(r, g, b)
+            totalSaturation += maxComponent == 0 ? 0 : (maxComponent - minComponent) / maxComponent
         }
 
-        let width = cgImage.width
-        let height = cgImage.height
-        let bytesPerPixel = 4
-        let bytesPerRow = width * bytesPerPixel
-        let bitsPerComponent = 8
+        let pixelCount = Float(width * height)
+        let temperature = estimateColorTemperature(
+            r: totalR / pixelCount,
+            g: totalG / pixelCount,
+            b: totalB / pixelCount
+        )
 
-        var pixelData = [UInt8](repeating: 0, count: width * height * bytesPerPixel)
-
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-              let context = CGContext(
-                data: &pixelData,
-                width: width,
-                height: height,
-                bitsPerComponent: bitsPerComponent,
-                bytesPerRow: bytesPerRow,
-                space: colorSpace,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-              ) else {
-            return nil
-        }
-
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        // Convert to Float tuples
-        var result = [(r: Float, g: Float, b: Float)]()
-        result.reserveCapacity(width * height)
-
-        for y in 0..<height {
-            for x in 0..<width {
-                let offset = (y * width + x) * bytesPerPixel
-                let r = Float(pixelData[offset]) / 255.0
-                let g = Float(pixelData[offset + 1]) / 255.0
-                let b = Float(pixelData[offset + 2]) / 255.0
-                result.append((r, g, b))
-            }
-        }
-
-        return result
+        return (temperature, totalSaturation / pixelCount)
     }
 
     /// Estimate color temperature from RGB ratios
@@ -337,62 +329,50 @@ class SceneFeatureExtractor {
         }
     }
 
-    /// Convert RGB to HSV for saturation extraction
-    private func rgbToHSV(_ pixel: (r: Float, g: Float, b: Float)) -> (h: Float, s: Float, v: Float) {
-        let maxComponent = max(pixel.r, pixel.g, pixel.b)
-        let minComponent = min(pixel.r, pixel.g, pixel.b)
-        let delta = maxComponent - minComponent
+    /// Compute center-weighted luminance using Gaussian weighting.
+    /// Mimics traditional center-weighted metering in photography: the middle
+    /// of the frame counts for more than the edges.
+    ///
+    /// Sigma is a quarter of *each* axis, so the frame edge sits at 2σ (~13.5%
+    /// weight) on both axes whatever the aspect ratio. That is the same
+    /// relationship the original square-only code had, generalized per axis
+    /// rather than replaced — a square buffer produces identical weights.
+    ///
+    /// The 2D Gaussian is separable — exp(-(dx²/2σx² + dy²/2σy²)) factors into
+    /// exp(-dx²/2σx²)·exp(-dy²/2σy²) — so the two 1D profiles cost width+height
+    /// `exp` calls instead of width×height (≈450 instead of ≈49,000), and the
+    /// weighted sum becomes one vDSP dot product per row. No cached state, so
+    /// the extractor stays free of shared mutable data.
+    private func computeCenterWeightedLuminance(
+        luminanceBuffer: [Float],
+        width: Int,
+        height: Int
+    ) -> Float {
+        guard width > 0, height > 0, luminanceBuffer.count == width * height else { return 0 }
 
-        let v = maxComponent
-        let s = maxComponent == 0 ? 0 : delta / maxComponent
-
-        // Hue not needed for saturation extraction
-        let h: Float = 0
-
-        return (h, s, v)
-    }
-
-    /// Compute center-weighted luminance using Gaussian weighting
-    /// Mimics traditional center-weighted metering in photography
-    private func computeCenterWeightedLuminance(luminanceBuffer: [Float]) -> Float {
-        // Calculate actual dimensions from buffer size (assumes square image)
-        let totalPixels = luminanceBuffer.count
-        let dimension = Int(sqrt(Double(totalPixels)))
-
-        // Safety check: ensure buffer is valid
-        guard dimension * dimension == totalPixels else {
-            // Fallback to simple mean if buffer size doesn't match expected dimensions
-            var mean: Float = 0
-            vDSP_meanv(luminanceBuffer, 1, &mean, vDSP_Length(luminanceBuffer.count))
-            return mean
+        let sigmaX = Float(width) / 4.0
+        let sigmaY = Float(height) / 4.0
+        let weightsX = (0..<width).map { x -> Float in
+            let dx = Float(x) - Float(width) / 2.0
+            return exp(-(dx * dx) / (2 * sigmaX * sigmaX))
+        }
+        let weightsY = (0..<height).map { y -> Float in
+            let dy = Float(y) - Float(height) / 2.0
+            return exp(-(dy * dy) / (2 * sigmaY * sigmaY))
         }
 
-        let width = dimension
-        let height = dimension
-
-        // Gaussian weighting parameters
-        let centerX = Float(width) / 2.0
-        let centerY = Float(height) / 2.0
-        let sigma = Float(width) / 4.0  // Standard deviation (covers ~95% at edges)
-
         var weightedSum: Float = 0
-        var totalWeight: Float = 0
-
-        for y in 0..<height {
-            for x in 0..<width {
-                let dx = Float(x) - centerX
-                let dy = Float(y) - centerY
-                let distanceSquared = dx * dx + dy * dy
-
-                // Gaussian weight: exp(-distance²/(2σ²))
-                let weight = exp(-distanceSquared / (2 * sigma * sigma))
-
-                let pixel = luminanceBuffer[y * width + x]
-                weightedSum += pixel * weight
-                totalWeight += weight
+        luminanceBuffer.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return }
+            for y in 0..<height {
+                var rowSum: Float = 0
+                vDSP_dotpr(base + y * width, 1, weightsX, 1, &rowSum, vDSP_Length(width))
+                weightedSum += rowSum * weightsY[y]
             }
         }
 
+        // The full weight matrix sums to the product of the two profile sums.
+        let totalWeight = weightsX.reduce(0, +) * weightsY.reduce(0, +)
         return weightedSum / totalWeight
     }
 }

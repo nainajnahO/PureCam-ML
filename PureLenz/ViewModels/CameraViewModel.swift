@@ -33,6 +33,11 @@ class CameraViewModel {
     private(set) var rawPreviewImage: UIImage?
     private(set) var isCapturingPreview = false
 
+    /// Dismisses the RAW preview after its 1-second display; stored so a new
+    /// capture (or backgrounding) cancels the previous dismissal instead of
+    /// letting it clobber the new preview's state.
+    private var previewDismissTask: Task<Void, Never>?
+
     /// Capture flash effect state
     private(set) var showCaptureFlash = false
 
@@ -60,14 +65,14 @@ class CameraViewModel {
     // MARK: - Lifecycle Management
 
     /// Handle scene phase changes (active, background, inactive)
-    func handleScenePhaseChange(_ newPhase: ScenePhase, autoExposureManager: AutoExposureManager?) {
+    func handleScenePhaseChange(_ newPhase: ScenePhase) {
         if newPhase == .active {
             cameraService.startSession()
             hapticManager.start()
-            autoExposureManager?.resetForNewSession()
         } else if newPhase == .background || newPhase == .inactive {
             cameraService.stopSession()
             hapticManager.stop()
+            previewDismissTask?.cancel()
             showRAWPreview = false
             rawPreviewImage = nil
             isCapturingPreview = false
@@ -81,6 +86,13 @@ class CameraViewModel {
         cameraService.onPreviewCaptured = { [weak self] image in
             guard let self = self else { return }
 
+            guard let image else {
+                // Capture failed — release the preview button instead of
+                // leaving it stuck in the in-flight state.
+                self.isCapturingPreview = false
+                return
+            }
+
             self.rawPreviewImage = image
 
             // Show preview with animation
@@ -88,24 +100,28 @@ class CameraViewModel {
                 self.showRAWPreview = true
             }
 
-            // Hide preview after 1 second
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            // Show for 1 second, fade out, then clear.
+            self.previewDismissTask?.cancel()
+            self.previewDismissTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
                 withAnimation(.easeInOut(duration: 0.2)) {
                     self.showRAWPreview = false
                 }
 
-                // Clear image after animation
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    self.rawPreviewImage = nil
-                    self.isCapturingPreview = false
-                }
+                // Clear image after the fade-out animation
+                try? await Task.sleep(for: .seconds(0.2))
+                guard !Task.isCancelled else { return }
+                self.rawPreviewImage = nil
+                self.isCapturingPreview = false
             }
         }
     }
 
     // MARK: - Preview Capture Control
 
-    /// Start a preview capture operation
+    /// Start a preview capture operation. The in-flight state is released by
+    /// `onPreviewCaptured` on both success and failure.
     /// - Returns: true if capture was initiated, false if already capturing/showing preview
     func startPreviewCapture() -> Bool {
         guard !isCapturingPreview && !showRAWPreview else {
@@ -113,19 +129,7 @@ class CameraViewModel {
         }
 
         isCapturingPreview = true
-        schedulePreviewCaptureTimeout()
         return true
-    }
-
-    /// Failsafe timeout to prevent stuck state
-    private func schedulePreviewCaptureTimeout() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            guard let self = self else { return }
-
-            if self.isCapturingPreview && !self.showRAWPreview {
-                self.isCapturingPreview = false
-            }
-        }
     }
 
     // MARK: - Capture Flash Animation
@@ -135,7 +139,7 @@ class CameraViewModel {
         showCaptureFlash = true
 
         Task {
-            try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
+            try? await Task.sleep(for: .seconds(0.05))
             withAnimation(.easeOut(duration: 0.15)) {
                 showCaptureFlash = false
             }
@@ -174,7 +178,7 @@ class CameraViewModel {
                 if Task.isCancelled { break }
                 self.framingPreviewImage = image
                 // ~15fps is plenty for a framing diagnostic; caps CPU and SwiftUI churn.
-                try? await Task.sleep(nanoseconds: 66_000_000)
+                try? await Task.sleep(for: .seconds(0.066))
             }
         }
     }

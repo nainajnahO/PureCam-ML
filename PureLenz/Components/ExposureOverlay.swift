@@ -22,14 +22,17 @@ struct ExposureOverlay: View {
     let currentShutterSpeed: Double
     let deviceOrientation: UIDeviceOrientation
 
-    private var exposureText: String {
+    /// The formatted current value for the active control, shared by the
+    /// portrait and landscape layouts so the number can't drift between them.
+    /// Deliberately String(format:) rather than a locale-aware FormatStyle:
+    /// the HUD is a fixed-format monospaced readout.
+    private var valueText: String {
         guard let active = activeControl else { return "" }
         switch active {
         case .iso:
-            return String(format: "ISO: %.0f", currentISO)
+            return String(format: "%.0f", currentISO)
         case .shutter:
-            let shutterFraction = 1.0 / currentShutterSpeed
-            return String(format: "Shutter Speed: 1/%.0f", shutterFraction)
+            return String(format: "1/%.0f", 1.0 / currentShutterSpeed)
         }
     }
 
@@ -53,25 +56,16 @@ struct ExposureOverlay: View {
 
     var body: some View {
         if let active = activeControl {
-            let isLandscape = deviceOrientation.isLandscape
-
             Group {
-                if isLandscape {
-                    // Landscape: stack vertically (prefix on top)
+                if deviceOrientation.isLandscape {
+                    // Landscape: stack vertically (short prefix on top)
                     VStack(spacing: 2) {
-                        switch active {
-                        case .iso:
-                            Text("ISO:")
-                            Text(String(format: "%.0f", currentISO))
-                        case .shutter:
-                            Text("Shutter:")
-                            let shutterFraction = 1.0 / currentShutterSpeed
-                            Text(String(format: "1/%.0f", shutterFraction))
-                        }
+                        Text(active == .iso ? "ISO:" : "Shutter:")
+                        Text(valueText)
                     }
                 } else {
                     // Portrait: horizontal text
-                    Text(exposureText)
+                    Text(active == .iso ? "ISO: \(valueText)" : "Shutter Speed: \(valueText)")
                 }
             }
             .font(.system(size: 18, weight: .medium, design: .monospaced))

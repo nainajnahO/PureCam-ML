@@ -28,4 +28,7 @@ extension Logger {
 
     /// Machine-learning inference, training, and feature extraction.
     static let ml = Logger(subsystem: subsystem, category: "ml")
+
+    /// Haptic engine lifecycle and playback.
+    static let haptics = Logger(subsystem: subsystem, category: "haptics")
 }

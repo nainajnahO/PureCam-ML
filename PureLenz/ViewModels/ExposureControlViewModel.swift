@@ -25,6 +25,7 @@ class ExposureControlViewModel {
 
     private let cameraService: CameraService
     private let hapticManager: HapticManager
+    private let autoExposureManager: AutoExposureManager
 
     // MARK: - State
 
@@ -46,9 +47,14 @@ class ExposureControlViewModel {
 
     // MARK: - Initialization
 
-    init(cameraService: CameraService, hapticManager: HapticManager) {
+    init(
+        cameraService: CameraService,
+        hapticManager: HapticManager,
+        autoExposureManager: AutoExposureManager
+    ) {
         self.cameraService = cameraService
         self.hapticManager = hapticManager
+        self.autoExposureManager = autoExposureManager
     }
 
     // MARK: - Public Methods
@@ -56,6 +62,9 @@ class ExposureControlViewModel {
     /// Update ISO based on drag gesture progress
     /// - Parameter progress: Progress value (0-1) representing rotation around the circle
     func updateISO(progress: Double) {
+        // A manual adjustment takes over from the AI prediction for the session.
+        autoExposureManager.notifyManualOverride()
+
         // Map progress to ISO logarithmically using ExposureCalculator
         let continuousISO = ExposureCalculator.isoFromProgress(
             progress,
@@ -64,7 +73,7 @@ class ExposureControlViewModel {
         )
 
         // Round to nearest discrete ISO value
-        let newISO = CameraService.roundToNearestISO(continuousISO)
+        let newISO = cameraService.roundToNearestISO(continuousISO)
 
         // Trigger haptic when discrete ISO value changes
         if newISO != lastDiscreteISO {
@@ -84,6 +93,9 @@ class ExposureControlViewModel {
     ///   - progress: Progress value (0-1) representing rotation around the circle
     ///   - normalizedAngle: Angle in degrees (0-360) for velocity tracking
     func updateShutter(progress: Double, normalizedAngle: Double) {
+        // A manual adjustment takes over from the AI prediction for the session.
+        autoExposureManager.notifyManualOverride()
+
         // Start rumble on first drag
         if lastDragTime == .distantPast {
             hapticManager.startShutterRumble()
@@ -157,11 +169,5 @@ class ExposureControlViewModel {
         }
 
         activeControl = nil
-    }
-
-    /// Notify auto-exposure manager that user manually overrode AI prediction
-    /// - Parameter autoExposureManager: The auto-exposure manager to notify
-    func notifyAutoExposureManager(_ autoExposureManager: AutoExposureManager?) {
-        autoExposureManager?.notifyManualOverride()
     }
 }

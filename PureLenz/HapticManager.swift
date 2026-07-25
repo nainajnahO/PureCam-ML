@@ -15,25 +15,79 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import CoreHaptics
-import Foundation
+import UIKit
+import OSLog
 
-/// Manages advanced haptic feedback using Core Haptics framework
-/// Provides discrete clicks for ISO and velocity-based rumble for shutter speed
-@Observable
-class HapticManager {
+/// Single home for haptic feedback: prepared UIKit impact generators for
+/// one-shot taps, plus Core Haptics for the exposure controls — discrete ISO
+/// clicks and velocity-modulated shutter rumble, which are beyond what
+/// UIFeedbackGenerator offers.
+final class HapticManager {
     private var engine: CHHapticEngine?
     private var continuousPlayer: CHHapticAdvancedPatternPlayer?
+
+    /// Cached player for the ISO detent click. The pattern never changes and
+    /// clicks can fire ~10-20×/s during a fast drag, so it is built once (and
+    /// rebuilt on engine reset) instead of per click.
+    private var isoClickPlayer: CHHapticPatternPlayer?
+
     private var isRumbling = false
+
+    /// The one-shot impact strengths this app uses. A dedicated enum rather
+    /// than `UIImpactFeedbackGenerator.FeedbackStyle`, so a call site can only
+    /// name a strength that is actually wired up — the wider UIKit type has
+    /// styles (`.soft`, `.rigid`) that would otherwise be accepted and then
+    /// silently do nothing.
+    enum Impact {
+        case light, medium, heavy
+    }
+
+    // Long-lived generators, shared by every view: creating one at tap time
+    // both allocates and starts cold. Keeping them alive covers the allocation;
+    // `prepare()` (see `prepare(_:)` and `impact(_:)`) covers the cold start.
+    private let lightGenerator = UIImpactFeedbackGenerator(style: .light)
+    private let mediumGenerator = UIImpactFeedbackGenerator(style: .medium)
+    private let heavyGenerator = UIImpactFeedbackGenerator(style: .heavy)
+
+    private func generator(for impact: Impact) -> UIImpactFeedbackGenerator {
+        switch impact {
+        case .light: lightGenerator
+        case .medium: mediumGenerator
+        case .heavy: heavyGenerator
+        }
+    }
 
     init() {
         prepareHaptics()
+    }
+
+    // MARK: - One-Shot Impacts
+
+    /// Warm the Taptic Engine for an impact that is about to happen.
+    ///
+    /// Worth calling when a gesture *begins* and the feedback comes later — a
+    /// long press, say, whose `.heavy` fires half a second after touch-down.
+    /// The readiness this buys expires after a short idle, which is why it is
+    /// renewed per gesture rather than once at init.
+    func prepare(_ impact: Impact) {
+        generator(for: impact).prepare()
+    }
+
+    /// Play a one-shot impact (button taps, gesture feedback).
+    func impact(_ impact: Impact) {
+        let generator = generator(for: impact)
+        generator.impactOccurred()
+        // Leave the engine warm: these fire in sequences (tap, then another
+        // tap; press, then release), and re-preparing here keeps the follow-up
+        // from paying the cold-start latency again.
+        generator.prepare()
     }
 
     // MARK: - Setup
 
     private func prepareHaptics() {
         guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else {
-            print("Device doesn't support haptics")
+            Logger.haptics.info("Device doesn't support haptics")
             return
         }
 
@@ -43,36 +97,35 @@ class HapticManager {
 
             // Handle engine stopped
             engine?.stoppedHandler = { [weak self] reason in
-                print("Haptic engine stopped: \(reason.rawValue)")
+                Logger.haptics.debug("Haptic engine stopped: \(reason.rawValue)")
                 self?.isRumbling = false
             }
 
-            // Handle engine reset
+            // Handle engine reset — a reset invalidates existing players, so
+            // the cached click player is rebuilt along with the restart.
             engine?.resetHandler = { [weak self] in
-                print("Haptic engine reset")
+                Logger.haptics.debug("Haptic engine reset")
                 do {
                     try self?.engine?.start()
+                    self?.makeISOClickPlayer()
                 } catch {
-                    print("Failed to restart haptic engine: \(error)")
+                    Logger.haptics.error("Failed to restart haptic engine: \(error.localizedDescription)")
                 }
             }
 
+            makeISOClickPlayer()
         } catch {
-            print("Failed to create haptic engine: \(error)")
+            Logger.haptics.error("Failed to create haptic engine: \(error.localizedDescription)")
         }
     }
 
-    // MARK: - ISO Haptics (Discrete Clicks)
+    /// Build the cached ISO click player: a sharp, brief transient that feels
+    /// like a mechanical detent.
+    private func makeISOClickPlayer() {
+        guard let engine else { return }
 
-    /// Play a discrete click haptic for ISO value changes
-    /// Sharp, brief feedback that feels like a mechanical detent
-    func playISOClick() {
-        guard let engine = engine else { return }
-
-        // Create a sharp, brief click
         let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.4)
         let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.4)
-
         let event = CHHapticEvent(
             eventType: .hapticTransient,
             parameters: [intensity, sharpness],
@@ -81,10 +134,20 @@ class HapticManager {
 
         do {
             let pattern = try CHHapticPattern(events: [event], parameters: [])
-            let player = try engine.makePlayer(with: pattern)
-            try player.start(atTime: CHHapticTimeImmediate)
+            isoClickPlayer = try engine.makePlayer(with: pattern)
         } catch {
-            print("❌ Failed to play ISO click: \(error)")
+            Logger.haptics.error("Failed to create ISO click player: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - ISO Haptics (Discrete Clicks)
+
+    /// Play a discrete click haptic for ISO value changes
+    func playISOClick() {
+        do {
+            try isoClickPlayer?.start(atTime: CHHapticTimeImmediate)
+        } catch {
+            Logger.haptics.error("Failed to play ISO click: \(error.localizedDescription)")
         }
     }
 
@@ -115,7 +178,7 @@ class HapticManager {
             isRumbling = true
 
         } catch {
-            print("❌ Failed to start shutter rumble: \(error)")
+            Logger.haptics.error("Failed to start shutter rumble: \(error.localizedDescription)")
         }
     }
 
@@ -145,7 +208,7 @@ class HapticManager {
         do {
             try player.sendParameters([intensityParam, sharpnessParam], atTime: CHHapticTimeImmediate)
         } catch {
-            print("Failed to update rumble intensity: \(error)")
+            Logger.haptics.error("Failed to update rumble intensity: \(error.localizedDescription)")
         }
     }
 
@@ -158,7 +221,7 @@ class HapticManager {
             isRumbling = false
             continuousPlayer = nil
         } catch {
-            print("Failed to stop shutter rumble: \(error)")
+            Logger.haptics.error("Failed to stop shutter rumble: \(error.localizedDescription)")
         }
     }
 
@@ -180,7 +243,7 @@ class HapticManager {
         do {
             try engine.start()
         } catch {
-            print("Failed to start haptic engine: \(error)")
+            Logger.haptics.error("Failed to start haptic engine: \(error.localizedDescription)")
         }
     }
 }

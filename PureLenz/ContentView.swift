@@ -56,10 +56,10 @@ struct ContentView: View {
                     cameraVM: scene.cameraVM,
                     exposureVM: scene.exposureVM,
                     autoExposure: scene.autoExposure,
+                    haptics: scene.haptics,
                     sizes: sizes,
                     positions: positions,
-                    textPosition: textPos,
-                    deviceOrientation: scene.cameraService.deviceOrientation
+                    textPosition: textPos
                 )
             }
             .ignoresSafeArea()
@@ -84,7 +84,7 @@ struct ContentView: View {
                 cameraService: scene.cameraService,
                 cameraVM: scene.cameraVM,
                 onTap: {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    scene.haptics.impact(.light)
                     scene.cameraVM.toggleFramingPreview()
                 }
             )

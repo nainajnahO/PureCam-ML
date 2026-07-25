@@ -26,55 +26,45 @@ import TabularData
 /// the same photographic error at ISO 50, which made the models sacrifice
 /// bright-scene accuracy. Inference (AutoExposureManager) exponentiates back.
 enum DataFrameBuilder {
-    /// Add one named column per scene feature, read straight from the typed
-    /// struct so the name↔value pairing is enforced by the compiler.
+    /// Add one named column per scene feature, iterating the shared
+    /// `SceneFeatures.mlFeatures` table — the same table inference reads —
+    /// so the training and inference schemas cannot drift apart.
     /// - Parameters:
     ///   - dataFrame: The DataFrame to modify (passed as inout)
     ///   - features: Scene features for each training sample
     static func addFeatureColumns(to dataFrame: inout DataFrame, features: [SceneFeatures]) {
-        dataFrame.append(column: Column(name: "meanLuminance", contents: features.map(\.meanLuminance)))
-        dataFrame.append(column: Column(name: "medianLuminance", contents: features.map(\.medianLuminance)))
-        dataFrame.append(column: Column(name: "minLuminance", contents: features.map(\.minLuminance)))
-        dataFrame.append(column: Column(name: "maxLuminance", contents: features.map(\.maxLuminance)))
-        dataFrame.append(column: Column(name: "stdDevLuminance", contents: features.map(\.stdDevLuminance)))
-        dataFrame.append(column: Column(name: "shadowsPercent", contents: features.map(\.shadowsPercent)))
-        dataFrame.append(column: Column(name: "midtonesPercent", contents: features.map(\.midtonesPercent)))
-        dataFrame.append(column: Column(name: "highlightsPercent", contents: features.map(\.highlightsPercent)))
-        dataFrame.append(column: Column(name: "clippedHighlightsPercent", contents: features.map(\.clippedHighlightsPercent)))
-        dataFrame.append(column: Column(name: "clippedShadowsPercent", contents: features.map(\.clippedShadowsPercent)))
-        dataFrame.append(column: Column(name: "colorTemperature", contents: features.map(\.colorTemperature)))
-        dataFrame.append(column: Column(name: "saturation", contents: features.map(\.saturation)))
-        dataFrame.append(column: Column(name: "centerWeightedLuminance", contents: features.map(\.centerWeightedLuminance)))
-        dataFrame.append(column: Column(name: "sceneLightLevel", contents: features.map(\.sceneLightLevel)))
+        for (name, value) in SceneFeatures.mlFeatures {
+            dataFrame.append(column: Column(name: name, contents: features.map { $0[keyPath: value] }))
+        }
     }
 
     /// Create DataFrame for ISO model training (scene features → log2 ISO target)
-    /// - Parameters:
-    ///   - features: Scene features for each training sample
-    ///   - isoTargets: Array of ISO target values (raw; stored as log2)
+    /// - Parameter samples: Training samples (features + user-chosen exposure)
     /// - Returns: DataFrame ready for MLBoostedTreeRegressor training
-    static func createISODataFrame(features: [SceneFeatures], isoTargets: [Float]) -> DataFrame {
+    static func createISODataFrame(samples: [TrainingSample]) -> DataFrame {
         var dataFrame = DataFrame()
-        addFeatureColumns(to: &dataFrame, features: features)
-        dataFrame.append(column: Column(name: "targetLogISO", contents: isoTargets.map { log2(Double($0)) }))
+        addFeatureColumns(to: &dataFrame, features: samples.map(\.features))
+        dataFrame.append(column: Column(
+            name: "targetLogISO",
+            contents: samples.map { log2(Double($0.userChosenISO)) }
+        ))
         return dataFrame
     }
 
     /// Create DataFrame for shutter model training (scene features + chosen log2 ISO → log2 shutter target)
-    /// - Parameters:
-    ///   - features: Scene features for each training sample
-    ///   - isoTargets: Array of chosen ISO values (raw; used as additional feature, stored as log2)
-    ///   - shutterTargets: Array of shutter speed target values in seconds (raw; stored as log2)
+    /// - Parameter samples: Training samples (features + user-chosen exposure)
     /// - Returns: DataFrame ready for MLBoostedTreeRegressor training
-    static func createShutterDataFrame(
-        features: [SceneFeatures],
-        isoTargets: [Float],
-        shutterTargets: [Double]
-    ) -> DataFrame {
+    static func createShutterDataFrame(samples: [TrainingSample]) -> DataFrame {
         var dataFrame = DataFrame()
-        addFeatureColumns(to: &dataFrame, features: features)
-        dataFrame.append(column: Column(name: "chosenLogISO", contents: isoTargets.map { log2(Double($0)) }))
-        dataFrame.append(column: Column(name: "targetLogShutter", contents: shutterTargets.map { log2($0) }))
+        addFeatureColumns(to: &dataFrame, features: samples.map(\.features))
+        dataFrame.append(column: Column(
+            name: "chosenLogISO",
+            contents: samples.map { log2(Double($0.userChosenISO)) }
+        ))
+        dataFrame.append(column: Column(
+            name: "targetLogShutter",
+            contents: samples.map { log2($0.userChosenShutterSeconds) }
+        ))
         return dataFrame
     }
 }

@@ -17,25 +17,13 @@
 
 import SwiftUI
 
-// FORCE APP TO RUN IN PORTRAIT
-class AppDelegate: NSObject, UIApplicationDelegate {
-    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
-        return .portrait
-    }
-}
-
+// The app is portrait-locked via the target's supported-interface-orientations
+// setting (Info.plist), so no AppDelegate orientation override is needed.
 @main
 struct PureLenzApp: App {
-
-    // APPLY PORTRAIT MODE
-    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
     var body: some Scene {
         WindowGroup {
-
-            // LOAD CONTENT VIEW
             ContentView()
-
                 // SET APP-WIDE ACCENT COLOUR
                 .tint(.yellow)
         }

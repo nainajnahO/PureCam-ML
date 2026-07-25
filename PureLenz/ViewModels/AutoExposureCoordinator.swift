@@ -20,7 +20,8 @@ import QuartzCore
 import OSLog
 
 /// Coordinator responsible for ML inference orchestration and AI prediction application
-/// Manages auto-exposure manager, training data collection, and AI animation
+/// Owns the ML session lifecycle (per-session reset + one-shot startup inference)
+/// and the AI animation.
 ///
 /// Inherits from NSObject so the exposure-ramp display link can target an
 /// `@objc` selector (same pattern as CameraService).
@@ -31,16 +32,10 @@ class AutoExposureCoordinator: NSObject {
     private let cameraService: CameraService
     private let exposureControlVM: ExposureControlViewModel
 
+    /// Auto-exposure manager for ML inference (owned by CameraScene).
+    private let autoExposureManager: AutoExposureManager
+
     // MARK: - State
-
-    /// Auto-exposure manager for ML inference
-    private(set) var autoExposureManager: AutoExposureManager?
-
-    /// Training data manager for ML model training
-    private let trainingDataManager: TrainingDataManager
-
-    /// Flag to ensure startup inference runs only once per session
-    private var hasTriggeredStartupInference = false
 
     /// AI animation state (HDR glow effect)
     private(set) var isAIAnimating = false
@@ -57,91 +52,72 @@ class AutoExposureCoordinator: NSObject {
     private var rampStartShutter: Double = 0
     private var rampTargetShutter: Double = 0
 
+    /// The pending camera-warmup delay before startup inference; stored so a
+    /// second `.active` (a Control Center swipe, a notification banner) cancels
+    /// the previous one instead of queueing a redundant frame capture.
+    private var startupInferenceTask: Task<Void, Never>?
+
     // MARK: - Initialization
 
-    init(cameraService: CameraService, exposureControlVM: ExposureControlViewModel) {
-        let dataManager = TrainingDataManager()
+    init(
+        cameraService: CameraService,
+        exposureControlVM: ExposureControlViewModel,
+        autoExposureManager: AutoExposureManager
+    ) {
         self.cameraService = cameraService
         self.exposureControlVM = exposureControlVM
-        self.trainingDataManager = dataManager
-        self.autoExposureManager = AutoExposureManager(dataManager: dataManager)
+        self.autoExposureManager = autoExposureManager
         super.init()
-
-        Logger.ml.debug("AutoExposureCoordinator initialized")
     }
 
     deinit {
         exposureRampLink?.invalidate()
+        startupInferenceTask?.cancel()
     }
 
     // MARK: - Public Methods
 
-    /// Handle scene phase changes (active, background, inactive)
+    /// Handle scene phase changes. The ML session lifecycle is owned here:
+    /// becoming active resets the per-session inference state and schedules the
+    /// one-shot startup inference after a short camera warmup.
+    ///
+    /// Inference runs at most once per active session: this type is main-actor
+    /// isolated (the target builds with `SWIFT_DEFAULT_ACTOR_ISOLATION =
+    /// MainActor`), so `runStartupInference`'s check of `hasRunStartupInference`
+    /// and its later set of it cannot interleave with another call. Cancelling
+    /// the pending delay below is therefore about not doing redundant work —
+    /// each stale task would still wake up and capture a frame before
+    /// discovering it had nothing to do.
     func handleScenePhaseChange(_ newPhase: ScenePhase) {
-        if newPhase == .active {
-            // Trigger inference after short delay for camera warmup
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.triggerStartupInferenceIfReady()
-            }
-        } else if newPhase == .background || newPhase == .inactive {
-            // Reset for next session
-            hasTriggeredStartupInference = false
+        startupInferenceTask?.cancel()
+        guard newPhase == .active else { return }
+        autoExposureManager.resetForNewSession()
+
+        startupInferenceTask = Task { [weak self] in
+            // Short delay for camera warmup before the startup inference.
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.triggerStartupInferenceIfReady()
         }
     }
 
-    /// Reset for new camera session
-    func resetForNewSession() {
-        autoExposureManager?.resetForNewSession()
-        hasTriggeredStartupInference = false
-    }
-
-    /// Record training sample if needed (called on manual photo capture)
+    /// Record a training sample from the next camera frame if the ML layer
+    /// wants one (called on manual photo capture). The recording policy and
+    /// the feature extraction both live in `AutoExposureManager`; this method
+    /// only supplies the frame.
     func recordTrainingSampleIfNeeded() {
-        // Record training sample if:
-        // 1. No model exists yet (.disabled) - collecting initial training data
-        // 2. User manually overrode AI prediction (.manualOverride)
-        // 3. Model load failed (.error) - need to retrain
-        guard let manager = autoExposureManager else { return }
-
-        // Only record in states where we need training data
-        switch manager.state {
-        case .disabled, .manualOverride, .error:
-            // Continue to record training sample
-            break
-        default:
-            // Skip recording in other states (.ready, .inferring, .applied)
-            return
-        }
+        guard autoExposureManager.wantsTrainingSample else { return }
 
         Task { [weak self] in
             guard let self,
                   let frame = await self.cameraService.captureNextFrame() else { return }
-            let extractor = SceneFeatureExtractor()
-            if let features = extractor.extract(
-                from: frame.image,
-                frameISO: frame.iso,
-                frameShutterSeconds: frame.shutterSeconds
-            ) {
-                // Label with the frame's own exposure, not the cached
-                // currentISO/currentShutterSpeed, which goes stale under
-                // continuous auto-exposure — see CameraService.CapturedFrame.
-                manager.recordTrainingSample(
-                    features: features,
-                    iso: frame.iso,
-                    shutterSeconds: frame.shutterSeconds
-                )
-            }
+            self.autoExposureManager.recordTrainingSampleIfNeeded(from: frame)
         }
     }
 
     /// Manually trigger AI inference (called by long press on preview button)
     /// Can be called multiple times, unlike startup inference
     func triggerManualInference() {
-        guard let manager = autoExposureManager else {
-            Logger.ml.error("AutoExposureManager not available")
-            return
-        }
-
         Logger.ml.debug("Manual inference triggered by user")
 
         Task { [weak self] in
@@ -151,7 +127,7 @@ class AutoExposureCoordinator: NSObject {
                 return
             }
 
-            if let prediction = manager.runManualInference(from: frame) {
+            if let prediction = self.autoExposureManager.runManualInference(from: frame) {
                 await MainActor.run {
                     // Reuse existing animation logic
                     self.applyAIPrediction(iso: prediction.iso, shutter: prediction.shutterSeconds)
@@ -166,13 +142,7 @@ class AutoExposureCoordinator: NSObject {
 
     /// Trigger startup inference if ready
     private func triggerStartupInferenceIfReady() {
-        guard let manager = autoExposureManager,
-              !hasTriggeredStartupInference,
-              cameraService.status == .configured else {
-            return
-        }
-
-        hasTriggeredStartupInference = true
+        guard cameraService.status == .configured else { return }
 
         Task { [weak self] in
             guard let self else { return }
@@ -180,7 +150,7 @@ class AutoExposureCoordinator: NSObject {
                 Logger.ml.debug("No preview frame available - staying in iOS auto mode")
                 return
             }
-            if let prediction = manager.runStartupInference(from: frame) {
+            if let prediction = self.autoExposureManager.runStartupInference(from: frame) {
                 await MainActor.run {
                     self.applyAIPrediction(iso: prediction.iso, shutter: prediction.shutterSeconds)
                 }
@@ -195,15 +165,15 @@ class AutoExposureCoordinator: NSObject {
 
     /// Apply AI prediction with smooth animation
     private func applyAIPrediction(iso: Float, shutter: Double) {
-        let roundedISO = CameraService.roundToNearestISO(iso)
+        let roundedISO = cameraService.roundToNearestISO(iso)
 
         // 1. Move the knobs to their predicted positions with a spring.
-        let isoAngle = AutoExposureManager.rotationAngleForISO(
+        let isoAngle = ExposureCalculator.angleFromISO(
             roundedISO,
             min: cameraService.minISO,
             max: cameraService.maxISO
         )
-        let shutterAngle = AutoExposureManager.rotationAngleForShutter(
+        let shutterAngle = ExposureCalculator.angleFromShutter(
             shutter,
             min: cameraService.minShutterSpeed,
             max: cameraService.maxShutterSpeed
@@ -234,11 +204,15 @@ class AutoExposureCoordinator: NSObject {
         exposureRampLink?.invalidate()
         rampStartTime = CACurrentMediaTime()
         let link = CADisplayLink(target: self, selector: #selector(stepExposureRamp(_:)))
+        // The sensor can't settle exposure at display rate, and every tick costs
+        // a lockForConfiguration round-trip on the session queue — ~15Hz is
+        // plenty for a smooth 1-second ramp.
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 10, maximum: 15, preferred: 15)
         link.add(to: .main, forMode: .common)
         exposureRampLink = link
     }
 
-    /// One tick of the exposure ramp, called once per display refresh.
+    /// One tick of the exposure ramp, called once per display-link fire.
     ///
     /// AVFoundation has no native ramp for custom ISO/shutter (unlike video
     /// zoom), so we interpolate ourselves — but with one display-synced timer
@@ -250,7 +224,7 @@ class AutoExposureCoordinator: NSObject {
         let interpolatedISO = rampStartISO + Float(eased) * (rampTargetISO - rampStartISO)
         let interpolatedShutter = rampStartShutter + eased * (rampTargetShutter - rampStartShutter)
         cameraService.setCustomExposure(
-            iso: CameraService.roundToNearestISO(interpolatedISO),
+            iso: cameraService.roundToNearestISO(interpolatedISO),
             shutterSeconds: interpolatedShutter
         )
 

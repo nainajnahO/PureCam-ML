@@ -74,8 +74,8 @@ struct SceneFeatures: Codable {
     /// The preview's luminance alone is ambiguous — a well-exposed sunny scene
     /// and a well-exposed dim scene look the same — so this divides out the
     /// exposure the frame was captured with to recover the absolute light level.
-    /// Datasets recorded before this feature existed are discarded by
-    /// TrainingDataManager's V2 filename migration.
+    /// Datasets recorded before this feature existed carry an older schema
+    /// suffix (see `MLFiles`) and are never read.
     let sceneLightLevel: Float
 
     // MARK: - Metadata
@@ -92,26 +92,36 @@ struct SceneFeatures: Codable {
         return log2(luminance) - Float(log2(exposure))
     }
 
+    // MARK: - ML Feature Schema
+
+    /// The single authoritative list of ML feature columns. Training
+    /// (DataFrameBuilder's columns) and inference (toMLFeatureProvider's keys)
+    /// both iterate this table, so the two schemas can never drift apart —
+    /// adding a feature is one property plus one row here.
+    static let mlFeatures: [(name: String, value: KeyPath<SceneFeatures, Float>)] = [
+        ("meanLuminance", \.meanLuminance),
+        ("medianLuminance", \.medianLuminance),
+        ("minLuminance", \.minLuminance),
+        ("maxLuminance", \.maxLuminance),
+        ("stdDevLuminance", \.stdDevLuminance),
+        ("shadowsPercent", \.shadowsPercent),
+        ("midtonesPercent", \.midtonesPercent),
+        ("highlightsPercent", \.highlightsPercent),
+        ("clippedHighlightsPercent", \.clippedHighlightsPercent),
+        ("clippedShadowsPercent", \.clippedShadowsPercent),
+        ("colorTemperature", \.colorTemperature),
+        ("saturation", \.saturation),
+        ("centerWeightedLuminance", \.centerWeightedLuminance),
+        ("sceneLightLevel", \.sceneLightLevel)
+    ]
+
     // MARK: - ML Conversion
 
     /// Convert to MLFeatureProvider for CoreML inference
     func toMLFeatureProvider() throws -> MLDictionaryFeatureProvider {
-        let dict: [String: Any] = [
-            "meanLuminance": meanLuminance,
-            "medianLuminance": medianLuminance,
-            "minLuminance": minLuminance,
-            "maxLuminance": maxLuminance,
-            "stdDevLuminance": stdDevLuminance,
-            "shadowsPercent": shadowsPercent,
-            "midtonesPercent": midtonesPercent,
-            "highlightsPercent": highlightsPercent,
-            "clippedHighlightsPercent": clippedHighlightsPercent,
-            "clippedShadowsPercent": clippedShadowsPercent,
-            "colorTemperature": colorTemperature,
-            "saturation": saturation,
-            "centerWeightedLuminance": centerWeightedLuminance,
-            "sceneLightLevel": sceneLightLevel
-        ]
+        let dict = Self.mlFeatures.reduce(into: [String: Any]()) { dict, feature in
+            dict[feature.name] = self[keyPath: feature.value]
+        }
         return try MLDictionaryFeatureProvider(dictionary: dict)
     }
 }
