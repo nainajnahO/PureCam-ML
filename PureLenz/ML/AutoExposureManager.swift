@@ -198,7 +198,7 @@ class AutoExposureManager {
         label: String
     ) -> (iso: Float, shutterSeconds: Double)? {
         state = .inferring
-        let startTime = Date()
+        let start = ContinuousClock.now
 
         // 1. Extract features
         guard let features = featureExtractor.extract(
@@ -218,8 +218,8 @@ class AutoExposureManager {
                 shutterModel: shutterModel
             )
 
-            let elapsed = Date().timeIntervalSince(startTime) * 1000
-            print("\(label) ML inference completed in \(String(format: "%.1f", elapsed))ms")
+            let elapsed = start.duration(to: ContinuousClock.now)
+            print("\(label) ML inference completed in \(elapsed.formatted(.units(allowed: [.milliseconds], width: .abbreviated, fractionalPart: .show(length: 1))))")
             print("     ISO: \(Int(prediction.iso))")
             print("     Shutter: 1/\(Int(1.0/prediction.shutterSeconds))")
 
@@ -308,6 +308,35 @@ class AutoExposureManager {
         }
     }
 
+    /// Whether both installed models were already built from the dataset as it
+    /// currently stands. `ModelTrainer` stamps each model it installs with the
+    /// `lastUpdated` of the dataset it snapshotted, so a model that is not older
+    /// than the dataset was trained on exactly these samples.
+    ///
+    /// The edge cases fall out: no model yet means no date, so it trains; a run
+    /// that failed leaves the previous stamp in place, so the next trigger
+    /// retries; a sample added since the last run makes the dataset newer.
+    private var isTrainingUpToDate: Bool {
+        // A stamp does not survive the filesystem exactly: `Date` is a Double of
+        // seconds and the on-disk timestamp is a timespec, so a value read back
+        // lands within a few hundred nanoseconds either side of what was written.
+        // Without slack, a model built from precisely this dataset can measure a
+        // nanosecond older than it and retrain anyway. Real new data is separated
+        // by a capture — milliseconds at the very least — so this is far too
+        // small to swallow a sample.
+        let filesystemTimestampSlack: TimeInterval = 0.001
+
+        let modelDates = [MLModelFiles.isoModelURL, MLModelFiles.shutterModelURL].compactMap { url -> Date? in
+            try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+        }
+        guard modelDates.count == 2 else { return false }
+
+        let datasetVersion = dataManager.dataset.lastUpdated
+        return modelDates.allSatisfy {
+            $0.timeIntervalSince(datasetVersion) >= -filesystemTimestampSlack
+        }
+    }
+
     /// Check conditions and trigger training if appropriate
     private func checkAndTriggerTrainingIfNeeded() {
         // Only train if device is charging
@@ -328,6 +357,15 @@ class AutoExposureManager {
         // close together — don't launch a second run on top of one already going.
         guard !ModelTrainer.isCurrentlyTraining else {
             print("Training already in progress — skipping")
+            return
+        }
+
+        // Two of the three triggers (launch, plugging in) say nothing about new
+        // data, so without this the same samples are refit into identical models
+        // on every launch while charging — burning battery and briefly removing
+        // two loadable models for no gain.
+        guard !isTrainingUpToDate else {
+            print("Models already built from the current dataset — skipping training")
             return
         }
 

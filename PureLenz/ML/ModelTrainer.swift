@@ -112,10 +112,16 @@ class ModelTrainer {
     private func performTraining() throws {
         print("Starting model training...")
 
-        let startTime = Date()
+        let start = ContinuousClock.now
 
         // Prepare training data
         print("Step 1: Preparing training data...")
+        // Snapshot the dataset's version alongside its samples. The installed
+        // models are stamped with it below so `AutoExposureManager` can tell
+        // whether a later trigger has anything new to train on. Reading it here
+        // rather than at install time means a sample recorded mid-run leaves the
+        // dataset newer than the models, so it still gets a run of its own.
+        let trainedDatasetVersion = dataManager.dataset.lastUpdated
         let (features, targets) = prepareTrainingData()
         print("Prepared \(features.count) samples")
 
@@ -185,10 +191,20 @@ class ModelTrainer {
 
         try FileManager.default.copyItem(at: compiledISOURL, to: finalISOURL)
         try FileManager.default.copyItem(at: compiledShutterURL, to: finalShutterURL)
+
+        // Record which version of the dataset these models were built from.
+        // `copyItem` would otherwise leave them stamped with the compile time,
+        // which says nothing about the data that went in.
+        for url in [finalISOURL, finalShutterURL] {
+            try FileManager.default.setAttributes(
+                [.modificationDate: trainedDatasetVersion],
+                ofItemAtPath: url.path
+            )
+        }
         print("Models installed to Documents directory")
 
-        let elapsed = Date().timeIntervalSince(startTime)
-        print("Model training completed in \(String(format: "%.1f", elapsed))s")
+        let elapsed = start.duration(to: ContinuousClock.now)
+        print("Model training completed in \(elapsed.formatted(.units(allowed: [.seconds], width: .abbreviated, fractionalPart: .show(length: 1))))")
     }
 
     /// Prepare training data from samples

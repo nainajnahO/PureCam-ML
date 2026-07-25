@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import CoreImage
+import CoreImage.CIFilterBuiltins
 import CoreVideo
 import Accelerate
 import UIKit
@@ -47,7 +48,7 @@ class SceneFeatureExtractor {
             return nil
         }
 
-        let startTime = Date()
+        let start = ContinuousClock.now
 
         // 1. Downsample image
         let downsampled = downsample(ciImage)
@@ -95,8 +96,8 @@ class SceneFeatureExtractor {
             timestamp: Date()
         )
 
-        let elapsed = Date().timeIntervalSince(startTime) * 1000
-        Logger.ml.debug("Feature extraction: \(String(format: "%.1f", elapsed))ms")
+        let elapsed = start.duration(to: ContinuousClock.now)
+        Logger.ml.debug("Feature extraction: \(elapsed.formatted(.units(allowed: [.milliseconds], width: .abbreviated, fractionalPart: .show(length: 1))))")
 
         return features
     }
@@ -121,12 +122,12 @@ class SceneFeatureExtractor {
             z: CGFloat(LuminanceConstants.rec709Blue),
             w: 0
         )
-        let grayscaleFilter = CIFilter(name: "CIColorMatrix")!
-        grayscaleFilter.setValue(image, forKey: kCIInputImageKey)
-        grayscaleFilter.setValue(lumaVector, forKey: "inputRVector")
-        grayscaleFilter.setValue(lumaVector, forKey: "inputGVector")
-        grayscaleFilter.setValue(lumaVector, forKey: "inputBVector")
-        grayscaleFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+        let grayscaleFilter = CIFilter.colorMatrix()
+        grayscaleFilter.inputImage = image
+        grayscaleFilter.rVector = lumaVector
+        grayscaleFilter.gVector = lumaVector
+        grayscaleFilter.bVector = lumaVector
+        grayscaleFilter.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
 
         guard let outputImage = grayscaleFilter.outputImage,
               let cgImage = context.createCGImage(outputImage, from: outputImage.extent) else {
