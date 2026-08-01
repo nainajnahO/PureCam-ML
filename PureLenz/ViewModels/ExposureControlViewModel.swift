@@ -134,21 +134,40 @@ class ExposureControlViewModel {
         // A manual adjustment takes over from the AI prediction for the session.
         autoExposureManager.notifyManualOverride()
 
-        let now = ContinuousClock.now
-        if let previousDragTime = lastDragTime {
-            let timeDelta = previousDragTime.duration(to: now) / .seconds(1)
+        let previousProgress = shutterProgress
+        let step = ExposureCalculator.accumulate(progress: shutterProgress, bearingDelta: delta)
+        shutterProgress = step.progress
+        reportWall(hit: step.hitWall)
 
-            // `delta` is already the shortest arc, so no unwrapping here.
-            let velocity = timeDelta > 0 ? abs(delta / timeDelta) : 0
+        // Rumble tracks how fast the *value* is moving, not how fast the thumb
+        // is. Driving it from the raw thumb delta kept it buzzing at full
+        // intensity against a knob that had stopped, because the thumb was still
+        // travelling. Applied travel shrinks to nothing as the knob reaches an
+        // end, so it now eases off into the wall instead.
+        let appliedDegrees = (shutterProgress - previousProgress)
+            * ExposureControlConstants.sweepDegrees
+
+        // Easing off is not enough on its own: `updateShutterRumble` floors
+        // intensity at 0.2, so a stopped knob would still hum. Pinned against an
+        // end, stop outright — the shutter counterpart of the ISO click falling
+        // silent once the detent stops changing. Both calls are idempotent, so
+        // driving them every frame is safe.
+        let isPinned = shutterProgress == previousProgress
+            && (shutterProgress == 0 || shutterProgress == 1)
+
+        let now = ContinuousClock.now
+        if isPinned {
+            hapticManager.stopShutterRumble()
+        } else if let previousDragTime = lastDragTime {
+            hapticManager.startShutterRumble()
+
+            let timeDelta = previousDragTime.duration(to: now) / .seconds(1)
+            let velocity = timeDelta > 0 ? abs(appliedDegrees / timeDelta) : 0
             let normalizedVelocity = min(velocity / ExposureControlConstants.maxRumbleVelocity, 1.0)
 
             hapticManager.updateShutterRumble(velocity: normalizedVelocity)
         }
         lastDragTime = now
-
-        let step = ExposureCalculator.accumulate(progress: shutterProgress, bearingDelta: delta)
-        shutterProgress = step.progress
-        reportWall(hit: step.hitWall)
 
         let newShutter = ExposureCalculator.shutterFromProgress(
             shutterProgress,

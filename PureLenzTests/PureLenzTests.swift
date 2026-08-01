@@ -123,6 +123,19 @@ struct KnobAccumulationTests {
         #expect(!pushOn.hitWall)
     }
 
+    /// What the shutter rumble reads. Its intensity comes from how far the value
+    /// actually travelled, so this being exactly zero against an end is what lets
+    /// it fall silent there. Deriving it from thumb movement instead left it
+    /// buzzing at full strength against a knob that had already stopped.
+    @Test("no travel is applied while held against an end")
+    func pinnedAgainstEndAppliesNoTravel() {
+        let atTop = ExposureCalculator.accumulate(progress: 1.0, bearingDelta: 45)
+        #expect(atTop.progress - 1.0 == 0)
+
+        let atBottom = ExposureCalculator.accumulate(progress: 0.0, bearingDelta: -45)
+        #expect(atBottom.progress - 0.0 == 0)
+    }
+
     /// Reversing has to release immediately. If arriving at the wall stored any
     /// overshoot, the user would have to wind that back before the value moved,
     /// which reads as the knob being stuck.
