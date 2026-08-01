@@ -44,7 +44,10 @@ struct TrainingSample: Codable, Identifiable {
 
 /// Storage container for the training dataset
 struct TrainingDataset: Codable {
-    /// All training samples (max 500, FIFO)
+    /// Upper bound on retained samples; the oldest are dropped past it.
+    static let maxSamples = 500
+
+    /// All training samples (max `maxSamples`, FIFO)
     var samples: [TrainingSample]
 
     /// When the dataset was first created
@@ -59,16 +62,22 @@ struct TrainingDataset: Codable {
         self.lastUpdated = Date()
     }
 
-    /// Add a new training sample
-    /// Maintains FIFO queue with max 500 samples
-    mutating func addSample(_ sample: TrainingSample) {
+    /// Add a new training sample, dropping the oldest past `maxSamples`.
+    ///
+    /// - Returns: The samples evicted by this call, so the caller can release
+    ///   whatever it stores per sample. Empty until the cap is reached.
+    @discardableResult
+    mutating func addSample(_ sample: TrainingSample) -> [TrainingSample] {
         samples.append(sample)
         lastUpdated = Date()
 
-        // FIFO: Keep only last 500 samples
-        if samples.count > 500 {
-            samples.removeFirst(samples.count - 500)
-        }
+        // FIFO: Keep only the most recent `maxSamples`.
+        let overflow = samples.count - Self.maxSamples
+        guard overflow > 0 else { return [] }
+
+        let evicted = Array(samples.prefix(overflow))
+        samples.removeFirst(overflow)
+        return evicted
     }
 
     /// Whether we have enough samples to start training

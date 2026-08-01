@@ -339,7 +339,10 @@ class AutoExposureManager {
     func recordTrainingSampleIfNeeded(from frame: CameraService.CapturedFrame) {
         guard wantsTrainingSample else { return }
 
-        guard let features = featureExtractor.extract(
+        // Features and thumbnail come from one call so the source frame is
+        // downsampled once rather than once per output — this runs on the main
+        // actor at shutter press.
+        guard let extracted = featureExtractor.extractWithThumbnail(
             from: frame.image,
             frameISO: frame.iso,
             frameShutterSeconds: frame.shutterSeconds
@@ -348,11 +351,18 @@ class AutoExposureManager {
         // Label with the frame's own exposure, not the cached
         // currentISO/currentShutterSpeed, which goes stale under continuous
         // auto-exposure — see CameraService.CapturedFrame.
-        dataManager.addSample(TrainingSample(
-            features: features,
-            iso: frame.iso,
-            shutterSeconds: frame.shutterSeconds
-        ))
+        //
+        // The thumbnail is the analysed frame itself. Keeping it is what lets a
+        // feature added to the schema later be computed for this sample rather
+        // than forcing the dataset to be discarded — see MLFiles.thumbnailDirectoryURL.
+        dataManager.addSample(
+            TrainingSample(
+                features: extracted.features,
+                iso: frame.iso,
+                shutterSeconds: frame.shutterSeconds
+            ),
+            thumbnail: extracted.thumbnail
+        )
 
         // Check if we should train (only when charging)
         checkAndTriggerTrainingIfNeeded()

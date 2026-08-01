@@ -18,6 +18,7 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import CoreVideo
 import Accelerate
+import ImageIO
 import UIKit
 import OSLog
 
@@ -31,6 +32,11 @@ class SceneFeatureExtractor {
 
     /// Long edge of the luminance analysis buffer (reduces 12MP to ~50K pixels).
     private let analysisSize: CGFloat = 256
+
+    /// JPEG quality for stored sample thumbnails. High enough that the features
+    /// recomputed from a thumbnail match those taken from the live frame to well
+    /// inside the noise floor of 256-bin histograms and channel averages.
+    private let thumbnailQuality: CGFloat = 0.8
 
     /// Rec. 709 luma coefficients for the grayscale conversion.
     private let lumaVector = CIVector(
@@ -49,6 +55,28 @@ class SceneFeatureExtractor {
     ///   - frameShutterSeconds: Exposure duration the frame was captured with
     /// - Returns: SceneFeatures if successful, nil otherwise
     func extract(from ciImage: CIImage, frameISO: Float, frameShutterSeconds: Double) -> SceneFeatures? {
+        extractWithThumbnail(
+            from: ciImage, frameISO: frameISO, frameShutterSeconds: frameShutterSeconds, includeThumbnail: false
+        )?.features
+    }
+
+    /// Extract scene features and, optionally, the JPEG of the very buffer they
+    /// were measured from.
+    ///
+    /// Both outputs need the same reduction of the source frame, so they are
+    /// produced together: measuring the features and encoding the JPEG in
+    /// separate passes would downsample the full-resolution frame twice and
+    /// render it through Core Image twice, once per shutter press.
+    ///
+    /// - Returns: Features plus thumbnail data, or nil if the frame's exposure
+    ///   is unusable or luminance extraction failed. `thumbnail` is nil when not
+    ///   requested, or when the frame has no encodable extent.
+    func extractWithThumbnail(
+        from ciImage: CIImage,
+        frameISO: Float,
+        frameShutterSeconds: Double,
+        includeThumbnail: Bool = true
+    ) -> (features: SceneFeatures, thumbnail: Data?)? {
         // A frame with unknown exposure can't be normalized into an absolute
         // scene light level — better no features than a wildly wrong value.
         guard frameISO > 0, frameShutterSeconds > 0 else {
@@ -58,7 +86,7 @@ class SceneFeatureExtractor {
 
         let start = ContinuousClock.now
 
-        // 1. Downsample image
+        // 1. Downsample image — once, shared by the statistics and the thumbnail.
         let downsampled = downsample(ciImage, toFit: analysisSize)
 
         // 2. Convert to luminance buffer (dimensions carried alongside — the
@@ -112,10 +140,36 @@ class SceneFeatureExtractor {
         let elapsed = start.duration(to: .now)
         Logger.ml.debug("Feature extraction: \(elapsed.formatted(.units(allowed: [.milliseconds], width: .abbreviated, fractionalPart: .show(length: 1))))")
 
-        return features
+        return (features, includeThumbnail ? jpegData(of: downsampled) : nil)
     }
 
     // MARK: - Private Helpers
+
+    /// JPEG-encode the already-downsampled analysis buffer.
+    ///
+    /// Because the stored image is the buffer at `analysisSize`, feeding it back
+    /// through `extract` re-runs the identical pipeline: `downsample` computes a
+    /// scale of 1.0, so no second reduction occurs and only JPEG quantization
+    /// separates the recomputed features from the originals.
+    ///
+    /// - Returns: JPEG data, or nil if the buffer has no encodable extent.
+    private func jpegData(of downsampled: CIImage) -> Data? {
+        guard !downsampled.extent.isEmpty, !downsampled.extent.isInfinite,
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            Logger.ml.error("Cannot encode thumbnail for frame with extent \(downsampled.extent.debugDescription)")
+            return nil
+        }
+
+        return context.jpegRepresentation(
+            of: downsampled,
+            colorSpace: colorSpace,
+            options: [
+                CIImageRepresentationOption(
+                    rawValue: kCGImageDestinationLossyCompressionQuality as String
+                ): thumbnailQuality
+            ]
+        )
+    }
 
     /// Downsample image so its long edge fits `target`, preserving aspect ratio.
     private func downsample(_ image: CIImage, toFit target: CGFloat) -> CIImage {
