@@ -125,6 +125,26 @@ enum ExposureCalculator {
         return (clamped, hitWall)
     }
 
+    // MARK: - Readout
+
+    /// A shutter speed as the denominator photographers say aloud: 1/250 s → 250.
+    ///
+    /// Returns nil when there is no usable reading yet. `CameraService` declares
+    /// `currentShutterSpeed = 0` and only fills it in once the capture session
+    /// has configured — and that configuration is suspended while the camera
+    /// permission dialog is on screen. So on a first-ever launch a reader can
+    /// genuinely see 0 here, and `1.0 / 0` is infinity: converting *that* to
+    /// `Int` is a hard trap, not a wrong number.
+    ///
+    /// The lower bound doubles as the overflow guard — anything at or above the
+    /// fastest supported shutter keeps the denominator inside a few thousand,
+    /// whereas an unbounded reciprocal could exceed `Int.max` and trap for the
+    /// same underlying reason.
+    static func shutterDenominator(forSeconds seconds: Double) -> Int? {
+        guard seconds >= CameraConstants.fastestManualShutter else { return nil }
+        return Int((1.0 / seconds).rounded())
+    }
+
     // MARK: - Private Helpers
 
     private static func clampProgress(_ progress: Double) -> Double {

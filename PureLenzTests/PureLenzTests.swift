@@ -95,6 +95,40 @@ struct ExposureCalculatorTests {
     }
 }
 
+@Suite("Shutter readout")
+struct ShutterReadoutTests {
+    /// The regression this exists for: `CameraService.currentShutterSpeed` is 0
+    /// until the session configures, and that configuration is suspended while
+    /// the camera-permission dialog is up. So a first-ever launch really does
+    /// read 0 here — and `Int(1.0 / 0)` is a trap, not a wrong number. The app
+    /// crashed before the user could grant permission, which is invisible on any
+    /// device that has already granted it.
+    @Test("an unconfigured shutter speed yields no reading instead of trapping")
+    func unconfiguredShutterHasNoReading() {
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: 0) == nil)
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: -1) == nil)
+    }
+
+    /// A denormal would divide to something finite but far past `Int.max`, which
+    /// traps for the same reason infinity does.
+    @Test("an implausibly fast shutter yields no reading rather than overflowing")
+    func implausiblyFastShutterHasNoReading() {
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: 1e-300) == nil)
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: .leastNonzeroMagnitude) == nil)
+    }
+
+    @Test("a real shutter speed reads as its spoken denominator")
+    func realShutterReadsAsDenominator() {
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: 1.0 / 250.0) == 250)
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: 0.5) == 2)
+        #expect(
+            ExposureCalculator.shutterDenominator(
+                forSeconds: CameraConstants.fastestManualShutter
+            ) == 4000
+        )
+    }
+}
+
 @Suite("Knob accumulation")
 struct KnobAccumulationTests {
     /// Turning the knob past an end must hold there. Before accumulation, the

@@ -37,8 +37,17 @@ struct CaptureButton: View {
     }
 
     /// Spoken shutter speed, as the fraction photographers actually say.
+    ///
+    /// Evaluated on every body pass, not only under VoiceOver, and the first of
+    /// those passes can precede the capture session being configured — see
+    /// `shutterDenominator(forSeconds:)` for why that used to be fatal.
     private var shutterValueText: String {
-        "1 over \(Int((1.0 / exposureVM.currentShutterSeconds).rounded())) second"
+        guard let denominator = ExposureCalculator.shutterDenominator(
+            forSeconds: exposureVM.currentShutterSeconds
+        ) else {
+            return "Not available"
+        }
+        return "1 over \(denominator) second"
     }
 
     var body: some View {
