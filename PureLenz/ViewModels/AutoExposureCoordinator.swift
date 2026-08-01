@@ -176,12 +176,12 @@ class AutoExposureCoordinator: NSObject {
         let roundedISO = cameraService.roundToNearestISO(iso)
 
         // 1. Move the knobs to their predicted positions with a spring.
-        let isoAngle = ExposureCalculator.angleFromISO(
+        let isoProgress = ExposureCalculator.progressFromISO(
             roundedISO,
             min: cameraService.minISO,
             max: cameraService.maxISO
         )
-        let shutterAngle = ExposureCalculator.angleFromShutter(
+        let shutterProgress = ExposureCalculator.progressFromShutter(
             shutter,
             min: cameraService.minShutterSpeed,
             max: cameraService.maxShutterSpeed
@@ -192,8 +192,8 @@ class AutoExposureCoordinator: NSObject {
 
         // 3. Animate the knobs to position.
         withAnimation(.spring(duration: 1.0, bounce: 0.3)) {
-            exposureControlVM.updateRotationAngle(control: .iso, angle: isoAngle)
-            exposureControlVM.updateRotationAngle(control: .shutter, angle: shutterAngle)
+            exposureControlVM.setProgress(control: .iso, progress: isoProgress)
+            exposureControlVM.setProgress(control: .shutter, progress: shutterProgress)
         }
 
         // 4. Ramp the actual camera exposure to the predicted values, driven by

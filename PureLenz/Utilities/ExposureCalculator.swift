@@ -34,7 +34,7 @@ enum ExposureCalculator {
     static func isoFromProgress(_ progress: Double, min: Float, max: Float) -> Float {
         let logMin = log(min)
         let logMax = log(max)
-        let logISO = logMin + Float(progress) * (logMax - logMin)
+        let logISO = logMin + Float(clampProgress(progress)) * (logMax - logMin)
         return exp(logISO)
     }
 
@@ -47,8 +47,88 @@ enum ExposureCalculator {
     static func shutterFromProgress(_ progress: Double, min: Double, max: Double) -> Double {
         let logMin = log(min)
         let logMax = log(max)
-        let logShutter = logMin + progress * (logMax - logMin)
+        let logShutter = logMin + clampProgress(progress) * (logMax - logMin)
         return exp(logShutter)
+    }
+
+    // MARK: - Inverse Mapping (Value → Progress)
+
+    /// Progress along the knob's arc for an ISO value (inverse of `isoFromProgress`).
+    /// - Returns: Progress clamped to 0...1.
+    static func progressFromISO(_ iso: Float, min: Float, max: Float) -> Double {
+        let logMin = log(min)
+        let logMax = log(max)
+        let logISO = log(iso)
+
+        return clampProgress(Double((logISO - logMin) / (logMax - logMin)))
+    }
+
+    /// Progress along the knob's arc for a shutter speed (inverse of `shutterFromProgress`).
+    /// - Returns: Progress clamped to 0...1.
+    static func progressFromShutter(_ shutterSeconds: Double, min: Double, max: Double) -> Double {
+        let logMin = log(min)
+        let logMax = log(max)
+        let logShutter = log(shutterSeconds)
+
+        return clampProgress((logShutter - logMin) / (logMax - logMin))
+    }
+
+    // MARK: - Knob Geometry
+
+    /// Where along the arc a given progress sits.
+    ///
+    /// The arc is `ExposureControlConstants.sweepDegrees`, not a full turn, so
+    /// 0 and 1 land at visibly different bearings either side of 12 o'clock.
+    /// - Returns: Rotation angle (0° = top, increases clockwise).
+    static func angle(forProgress progress: Double) -> Angle {
+        Angle.degrees(clampProgress(progress) * ExposureControlConstants.sweepDegrees)
+    }
+
+    /// Signed shortest-arc difference between two compass bearings, in degrees.
+    ///
+    /// A thumb crossing 12 o'clock reports bearings that jump 359° → 1°, which
+    /// naively reads as a 358° leap backwards. Taking the shortest arc turns that
+    /// into the +2° it physically was. Result is always within ±180°.
+    static func shortestArcDelta(from: Double, to: Double) -> Double {
+        var delta = to - from
+        if delta > 180 {
+            delta -= 360
+        } else if delta < -180 {
+            delta += 360
+        }
+        return delta
+    }
+
+    /// Advance accumulated progress by a thumb movement, stopping at the ends.
+    ///
+    /// This is what makes the wall a wall: progress is carried across frames and
+    /// clamped, rather than being recomputed from the thumb's absolute bearing.
+    /// Pushing further into an end has no effect, and reversing leaves it on the
+    /// very next frame — no unwinding of overshoot, because none is stored.
+    ///
+    /// - Parameters:
+    ///   - progress: Accumulated progress so far, 0...1.
+    ///   - bearingDelta: Degrees turned since the last frame, signed.
+    /// - Returns: The new progress, and whether this call was the one that
+    ///   arrived at an end — so a caller can fire feedback once rather than on
+    ///   every frame spent pressed against it.
+    static func accumulate(
+        progress: Double,
+        bearingDelta: Double
+    ) -> (progress: Double, hitWall: Bool) {
+        let unclamped = progress + bearingDelta / ExposureControlConstants.sweepDegrees
+        let clamped = clampProgress(unclamped)
+
+        // Only a transition counts. Already sitting at an end and pushing harder
+        // is not a new arrival, so `clamped != progress` guards the repeat.
+        let hitWall = unclamped != clamped && clamped != progress
+        return (clamped, hitWall)
+    }
+
+    // MARK: - Private Helpers
+
+    private static func clampProgress(_ progress: Double) -> Double {
+        Swift.max(0, Swift.min(1, progress))
     }
 
     // MARK: - Inverse Mapping (Value → Angle)
@@ -61,17 +141,7 @@ enum ExposureCalculator {
     ///   - max: Maximum ISO value
     /// - Returns: Rotation angle (0° = top, increases clockwise)
     static func angleFromISO(_ iso: Float, min: Float, max: Float) -> Angle {
-        let logMin = log(min)
-        let logMax = log(max)
-        let logISO = log(iso)
-
-        // Solve for progress
-        let progress = (logISO - logMin) / (logMax - logMin)
-        let clampedProgress = Swift.max(0, Swift.min(1, progress))
-
-        // Convert progress to degrees (full rotation = 360°)
-        let degrees = clampedProgress * 360.0
-        return Angle.degrees(Double(degrees))
+        angle(forProgress: progressFromISO(iso, min: min, max: max))
     }
 
     /// Calculate rotation angle from shutter speed (inverse of shutterFromProgress)
@@ -82,14 +152,6 @@ enum ExposureCalculator {
     ///   - max: Maximum shutter speed in seconds
     /// - Returns: Rotation angle (0° = top, increases clockwise)
     static func angleFromShutter(_ shutterSeconds: Double, min: Double, max: Double) -> Angle {
-        let logMin = log(min)
-        let logMax = log(max)
-        let logShutter = log(shutterSeconds)
-
-        let progress = (logShutter - logMin) / (logMax - logMin)
-        let clampedProgress = Swift.max(0, Swift.min(1, progress))
-
-        let degrees = clampedProgress * 360.0
-        return Angle.degrees(degrees)
+        angle(forProgress: progressFromShutter(shutterSeconds, min: min, max: max))
     }
 }
