@@ -44,7 +44,11 @@ struct TrainingSample: Codable, Identifiable {
 
 /// Storage container for the training dataset
 struct TrainingDataset: Codable {
-    /// All training samples (max 500, FIFO)
+    /// Retained-sample cap used when Settings holds no value of its own. Kept in
+    /// step with the `maxTrainingSamples` default in `Settings.bundle/Root.plist`.
+    static let defaultMaxSamples = 500
+
+    /// All training samples (FIFO, capped — see `addSample(_:maxSamples:)`)
     var samples: [TrainingSample]
 
     /// When the dataset was first created
@@ -59,17 +63,30 @@ struct TrainingDataset: Codable {
         self.lastUpdated = Date()
     }
 
-    /// Add a new training sample
-    /// Maintains a FIFO queue capped at `maxSamples` (configurable via the Settings app;
-    /// defaults to 500 to preserve previous behavior when called without a value).
-    mutating func addSample(_ sample: TrainingSample, maxSamples: Int = 500) {
+    /// Add a new training sample, dropping the oldest past `maxSamples`.
+    ///
+    /// - Parameters:
+    ///   - sample: The sample to append.
+    ///   - maxSamples: Retained-sample cap, configurable in the Settings app.
+    /// - Returns: The samples evicted by this call, so the caller can release
+    ///   whatever it stores per sample. Empty until the cap is reached.
+    @discardableResult
+    mutating func addSample(
+        _ sample: TrainingSample,
+        maxSamples: Int = Self.defaultMaxSamples
+    ) -> [TrainingSample] {
         samples.append(sample)
         lastUpdated = Date()
 
-        // FIFO: keep only the most recent `maxSamples` samples.
-        if samples.count > maxSamples {
-            samples.removeFirst(samples.count - maxSamples)
-        }
+        // FIFO: keep only the most recent `maxSamples`. Lowering the cap in
+        // Settings drops the whole backlog on the next capture, not a single
+        // sample, so every dropped sample is returned rather than just the head.
+        let overflow = samples.count - maxSamples
+        guard overflow > 0 else { return [] }
+
+        let evicted = Array(samples.prefix(overflow))
+        samples.removeFirst(overflow)
+        return evicted
     }
 
     /// Whether we have enough samples to start training

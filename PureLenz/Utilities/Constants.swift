@@ -59,6 +59,30 @@ enum MLFiles {
         URL.documentsDirectory.appendingPathComponent("trainingDataV3.json")
     }
 
+    /// Directory holding one JPEG per training sample: the downsampled buffer
+    /// feature extraction actually analysed, kept as raw material.
+    ///
+    /// Deliberately *not* version-suffixed, and that is the whole point. The
+    /// features derived from a frame go stale when the schema changes; the frame
+    /// itself never does. Keeping the pixels means a new feature can be computed
+    /// for samples recorded before it existed.
+    ///
+    /// That backfill is an **in-place migration of the current dataset** —
+    /// recompute the new column for the existing samples and save them back
+    /// under the same name. It is the alternative to bumping the suffix, not a
+    /// thing that happens across a bump: a bump orphans the labels in the old
+    /// `trainingData*.json`, and `removeSupersededArtifacts` then deletes them,
+    /// so the exposure values a re-extraction needs are gone. Bumping remains
+    /// the right move for a change no migration can express — it just means
+    /// accepting the reset, thumbnails included.
+    ///
+    /// Stored beside the dataset rather than inside it because these are cold:
+    /// written once, read only during a migration, while `trainingDataURL` is
+    /// decoded in full at every launch.
+    static var thumbnailDirectoryURL: URL {
+        URL.documentsDirectory.appendingPathComponent("SampleThumbnails", isDirectory: true)
+    }
+
     /// The name stem and extension of each artifact family, used to recognise
     /// versioned files from *any* schema generation.
     private static let artifactPatterns: [(stem: String, fileExtension: String)] = [
