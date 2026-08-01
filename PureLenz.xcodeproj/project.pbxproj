@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		3C484C1E2F04863C0040EB3F /* TestPlan.xctestplan in Resources */ = {isa = PBXBuildFile; fileRef = 3C484C1D2F04863C0040EB3F /* TestPlan.xctestplan */; };
+		3C8AE9C32FE0A39500B1BD46 /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 3C8AE9C22FE0A39400B1BD46 /* Settings.bundle */; };
 		3CC927372FD6B39F00FC0AE2 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3CC927362FD6B39F00FC0AE2 /* WidgetKit.framework */; };
 		3CC927392FD6B39F00FC0AE2 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3CC927382FD6B39F00FC0AE2 /* SwiftUI.framework */; };
 		3CC927462FD6B3A000FC0AE2 /* PureLenzControlsExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 3CC927342FD6B39F00FC0AE2 /* PureLenzControlsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -46,6 +47,7 @@
 
 /* Begin PBXFileReference section */
 		3C484C1D2F04863C0040EB3F /* TestPlan.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = TestPlan.xctestplan; sourceTree = "<group>"; };
+		3C8AE9C22FE0A39400B1BD46 /* Settings.bundle */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.plug-in"; path = Settings.bundle; sourceTree = "<group>"; };
 		3CC927342FD6B39F00FC0AE2 /* PureLenzControlsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PureLenzControlsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		3CC927362FD6B39F00FC0AE2 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		3CC927382FD6B39F00FC0AE2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
@@ -133,6 +135,7 @@
 		3CE474352EFE25840097E20A = {
 			isa = PBXGroup;
 			children = (
+				3C8AE9C22FE0A39400B1BD46 /* Settings.bundle */,
 				3C484C1D2F04863C0040EB3F /* TestPlan.xctestplan */,
 				3CC9273A2FD6B39F00FC0AE2 /* PureLenzControls */,
 				3CD702E42FDA1D76001D90C4 /* PureLenzTests */,
@@ -287,6 +290,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3C8AE9C32FE0A39500B1BD46 /* Settings.bundle in Resources */,
 				3C484C1E2F04863C0040EB3F /* TestPlan.xctestplan in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

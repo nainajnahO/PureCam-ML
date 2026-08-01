@@ -58,7 +58,13 @@ class TrainingDataManager {
             writeThumbnail(thumbnail, for: sample.id)
         }
 
-        let evicted = dataset.addSample(sample)
+        // FIFO cap configured via the Settings app (Max training samples). The
+        // `> 0` check falls back for an unregistered or zero read — `integer(forKey:)`
+        // cannot distinguish "absent" from "0", and a 0 cap would evict every sample.
+        let cap = UserDefaults.standard.integer(forKey: "maxTrainingSamples")
+        let evicted = dataset.addSample(
+            sample, maxSamples: cap > 0 ? cap : TrainingDataset.defaultMaxSamples
+        )
 
         // Only release an evicted sample's thumbnail once the eviction is on
         // disk. If the save failed, the stored dataset still lists that sample,
@@ -72,6 +78,7 @@ class TrainingDataManager {
                 try? FileManager.default.removeItem(at: thumbnailURL(for: evictedSample.id))
             }
         }
+
 
         Logger.ml.info("Added training sample (\(self.dataset.samples.count) total)")
     }

@@ -415,10 +415,10 @@ struct TrainingDatasetEvictionTests {
     @Test("adding below the cap evicts nothing")
     func noEvictionBelowCap() {
         var dataset = TrainingDataset()
-        for _ in 0..<TrainingDataset.maxSamples {
+        for _ in 0..<TrainingDataset.defaultMaxSamples {
             #expect(dataset.addSample(sample()).isEmpty)
         }
-        #expect(dataset.samples.count == TrainingDataset.maxSamples)
+        #expect(dataset.samples.count == TrainingDataset.defaultMaxSamples)
     }
 
     /// The evicted samples are the only signal the manager has for deleting
@@ -427,14 +427,44 @@ struct TrainingDatasetEvictionTests {
     @Test("passing the cap returns the dropped sample so its thumbnail can be released")
     func evictionReportsDroppedSample() {
         var dataset = TrainingDataset()
-        for _ in 0..<TrainingDataset.maxSamples { dataset.addSample(sample()) }
+        for _ in 0..<TrainingDataset.defaultMaxSamples { dataset.addSample(sample()) }
 
         let oldest = dataset.samples[0].id
         let evicted = dataset.addSample(sample())
 
         #expect(evicted.map(\.id) == [oldest])
-        #expect(dataset.samples.count == TrainingDataset.maxSamples)
+        #expect(dataset.samples.count == TrainingDataset.defaultMaxSamples)
         #expect(!dataset.samples.contains { $0.id == oldest })
+    }
+
+    /// Lowering "Max training samples" in Settings drops the whole backlog on
+    /// the next capture, not one sample. Every dropped sample must come back so
+    /// its thumbnail is released — returning only the head would strand the rest
+    /// on disk with no sample left to match them to.
+    @Test("lowering the cap returns the entire backlog it drops")
+    func loweringCapReturnsWholeBacklog() {
+        var dataset = TrainingDataset()
+        for _ in 0..<20 { dataset.addSample(sample(), maxSamples: 100) }
+
+        let survivors = dataset.samples.suffix(4).map(\.id)
+        let evicted = dataset.addSample(sample(), maxSamples: 5)
+
+        // 21 samples against a cap of 5: 16 go, the last 4 plus the new one stay.
+        #expect(evicted.count == 16)
+        #expect(dataset.samples.count == 5)
+        #expect(Set(evicted.map(\.id)).isDisjoint(with: Set(survivors)))
+    }
+
+    /// The cap is read per call rather than captured at init, so raising it in
+    /// Settings has to take effect without restarting the app.
+    @Test("raising the cap stops evicting immediately")
+    func raisingCapStopsEviction() {
+        var dataset = TrainingDataset()
+        for _ in 0..<10 { dataset.addSample(sample(), maxSamples: 10) }
+
+        #expect(dataset.addSample(sample(), maxSamples: 10).count == 1)
+        #expect(dataset.addSample(sample(), maxSamples: 50).isEmpty)
+        #expect(dataset.samples.count == 11)
     }
 }
 

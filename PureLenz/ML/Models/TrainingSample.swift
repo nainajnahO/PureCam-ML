@@ -44,10 +44,11 @@ struct TrainingSample: Codable, Identifiable {
 
 /// Storage container for the training dataset
 struct TrainingDataset: Codable {
-    /// Upper bound on retained samples; the oldest are dropped past it.
-    static let maxSamples = 500
+    /// Retained-sample cap used when Settings holds no value of its own. Kept in
+    /// step with the `maxTrainingSamples` default in `Settings.bundle/Root.plist`.
+    static let defaultMaxSamples = 500
 
-    /// All training samples (max `maxSamples`, FIFO)
+    /// All training samples (FIFO, capped — see `addSample(_:maxSamples:)`)
     var samples: [TrainingSample]
 
     /// When the dataset was first created
@@ -64,15 +65,23 @@ struct TrainingDataset: Codable {
 
     /// Add a new training sample, dropping the oldest past `maxSamples`.
     ///
+    /// - Parameters:
+    ///   - sample: The sample to append.
+    ///   - maxSamples: Retained-sample cap, configurable in the Settings app.
     /// - Returns: The samples evicted by this call, so the caller can release
     ///   whatever it stores per sample. Empty until the cap is reached.
     @discardableResult
-    mutating func addSample(_ sample: TrainingSample) -> [TrainingSample] {
+    mutating func addSample(
+        _ sample: TrainingSample,
+        maxSamples: Int = Self.defaultMaxSamples
+    ) -> [TrainingSample] {
         samples.append(sample)
         lastUpdated = Date()
 
-        // FIFO: Keep only the most recent `maxSamples`.
-        let overflow = samples.count - Self.maxSamples
+        // FIFO: keep only the most recent `maxSamples`. Lowering the cap in
+        // Settings drops the whole backlog on the next capture, not a single
+        // sample, so every dropped sample is returned rather than just the head.
+        let overflow = samples.count - maxSamples
         guard overflow > 0 else { return [] }
 
         let evicted = Array(samples.prefix(overflow))

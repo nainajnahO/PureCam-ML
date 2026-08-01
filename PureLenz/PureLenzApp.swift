@@ -21,6 +21,27 @@ import SwiftUI
 // setting (Info.plist), so no AppDelegate orientation override is needed.
 @main
 struct PureLenzApp: App {
+
+    // REGISTER SETTINGS DEFAULTS
+    //
+    // Values configured in the Settings.bundle (Settings app) aren't copied into
+    // UserDefaults until the user actually opens the app's Settings page. Registering
+    // matching defaults here guarantees the app always has a known value. Keep these
+    // identical to the DefaultValue entries in Root.plist.
+    //
+    // This runs in the App's initializer rather than an AppDelegate launch hook:
+    // the App value is created before its scene body is evaluated, so the defaults
+    // are in place before ContentView's @AppStorage ever reads them — and the app
+    // needs no AppDelegate otherwise.
+    init() {
+        UserDefaults.standard.register(defaults: [
+            "showFramingIndicator": true,
+            "autoExposureOnLaunch": true,
+            "contributeTrainingData": true,
+            "maxTrainingSamples": 500
+        ])
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
