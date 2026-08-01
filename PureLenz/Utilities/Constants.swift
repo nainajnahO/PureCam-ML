@@ -65,13 +65,20 @@ enum MLFiles {
     /// Deliberately *not* version-suffixed, and that is the whole point. The
     /// features derived from a frame go stale when the schema changes; the frame
     /// itself never does. Keeping the pixels means a new feature can be computed
-    /// for samples recorded before it existed — a backfill instead of the reset
-    /// that a suffix bump forces. Stored beside the dataset rather than inside
-    /// it because these are cold: written once, read only during a backfill,
-    /// while `trainingDataURL` is decoded in full at every launch.
+    /// for samples recorded before it existed.
     ///
-    /// Thumbnails are only meaningful attached to a sample's exposure labels, so
-    /// they are pruned against the dataset rather than kept independently.
+    /// That backfill is an **in-place migration of the current dataset** —
+    /// recompute the new column for the existing samples and save them back
+    /// under the same name. It is the alternative to bumping the suffix, not a
+    /// thing that happens across a bump: a bump orphans the labels in the old
+    /// `trainingData*.json`, and `removeSupersededArtifacts` then deletes them,
+    /// so the exposure values a re-extraction needs are gone. Bumping remains
+    /// the right move for a change no migration can express — it just means
+    /// accepting the reset, thumbnails included.
+    ///
+    /// Stored beside the dataset rather than inside it because these are cold:
+    /// written once, read only during a migration, while `trainingDataURL` is
+    /// decoded in full at every launch.
     static var thumbnailDirectoryURL: URL {
         URL.documentsDirectory.appendingPathComponent("SampleThumbnails", isDirectory: true)
     }
