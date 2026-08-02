@@ -147,20 +147,39 @@ class CameraService: NSObject {
         }
     }
     
-    func resetAutoExposure() {
+    /// Take over whatever exposure the device has metered and hold it.
+    ///
+    /// This is the app's starting exposure, and it replaces the old
+    /// `resetAutoExposure()`. iOS auto-exposure now runs only during the camera
+    /// warmup that precedes this call — it is a *seed*, never a resting state.
+    /// Reading its settled result and re-applying it through
+    /// `setCustomExposure` is the whole point: every exposure the camera holds
+    /// is then one this app set, so `currentISO` / `currentShutterSpeed` are
+    /// correct by construction and cannot drift behind the app's back.
+    ///
+    /// ISO is snapped to the nearest detent because the manual knob only offers
+    /// detents — holding an off-table value would leave the knob unable to find
+    /// its own position. The resulting shift is at most 1/6 stop.
+    func holdCurrentExposure() {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             guard let input = self.session.inputs.first as? AVCaptureDeviceInput else { return }
             let device = input.device
 
-            do {
-                try device.lockForConfiguration()
-                if device.isExposureModeSupported(.continuousAutoExposure) {
-                    device.exposureMode = .continuousAutoExposure
-                }
-                device.unlockForConfiguration()
-            } catch {
-                Logger.camera.error("Failed to reset auto exposure: \(error.localizedDescription)")
+            // Taken mid-adjustment this is a slightly early reading rather than
+            // a wrong one, and it is only a starting value — not worth waiting
+            // on `isAdjustingExposure` for.
+            let meteredISO = device.iso
+            let meteredShutter = device.exposureDuration.seconds
+
+            // Hop to main to round: `isoDetents` is written on the main thread
+            // (see configureSession) and must not be read from this queue.
+            // `setCustomExposure` dispatches back to sessionQueue itself.
+            DispatchQueue.main.async {
+                self.setCustomExposure(
+                    iso: self.roundToNearestISO(meteredISO),
+                    shutterSeconds: meteredShutter
+                )
             }
         }
     }

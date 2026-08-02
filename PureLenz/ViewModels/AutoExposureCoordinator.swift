@@ -143,19 +143,32 @@ class AutoExposureCoordinator: NSObject {
 
     // MARK: - Private Methods
 
-    /// Trigger startup inference if ready
+    /// Trigger startup inference if ready.
+    ///
+    /// Every path out of this method leaves the camera holding an exposure the
+    /// app set — from the model when there is one, from the scene reading iOS
+    /// metered during the warmup delay above when there is not. The app never
+    /// rests in `continuousAutoExposure`, so `CameraService.currentISO` /
+    /// `currentShutterSpeed` always describe the exposure actually in force.
     private func triggerStartupInferenceIfReady() {
-        // Respect the user's "Auto-adjust exposure on launch" setting (Settings app).
-        // When off, we leave the camera in iOS auto-exposure; manual long-press inference
-        // (triggerManualInference) is unaffected.
-        guard UserDefaults.standard.bool(forKey: "autoExposureOnLaunch") else { return }
-
         guard cameraService.status == .configured else { return }
+
+        // Respect the user's "Auto-adjust exposure on launch" setting (Settings app).
+        // When off, the app skips inference but still takes over the metered
+        // exposure; manual long-press inference (triggerManualInference) is unaffected.
+        guard UserDefaults.standard.bool(forKey: "autoExposureOnLaunch") else {
+            cameraService.holdCurrentExposure()
+            Logger.ml.debug("Startup inference disabled - holding the metered exposure")
+            return
+        }
 
         Task { [weak self] in
             guard let self else { return }
             guard let frame = await self.cameraService.captureNextFrame() else {
-                Logger.ml.debug("No preview frame available - staying in iOS auto mode")
+                await MainActor.run {
+                    self.cameraService.holdCurrentExposure()
+                    Logger.ml.debug("No preview frame available - holding the metered exposure")
+                }
                 return
             }
             if let prediction = self.autoExposureManager.runStartupInference(from: frame) {
@@ -164,8 +177,8 @@ class AutoExposureCoordinator: NSObject {
                 }
             } else {
                 await MainActor.run {
-                    self.cameraService.resetAutoExposure()
-                    Logger.ml.debug("Using iOS auto-exposure (ML not available)")
+                    self.cameraService.holdCurrentExposure()
+                    Logger.ml.debug("No trained model yet - holding the metered exposure")
                 }
             }
         }
