@@ -76,11 +76,11 @@ class ModelTrainer {
 
             DispatchQueue.main.async {
                 switch result {
-                case .success(let trainedVersion):
+                case .success(let trainedThroughSampleID):
                     // Marked here rather than on the training queue so every
                     // mutation of the dataset happens on main, alongside
                     // `addSample`.
-                    dataManager.markTrained(through: trainedVersion)
+                    dataManager.markTrained(throughSampleID: trainedThroughSampleID)
                     NotificationCenter.default.post(name: .mlModelUpdated, object: nil)
                 case .failure(let error):
                     Logger.ml.error("Model training failed: \(error.localizedDescription)")
@@ -96,15 +96,14 @@ class ModelTrainer {
     /// Train synchronously (called on a background queue by `train`). Throws on
     /// any failure so the caller can report it.
     ///
-    /// - Returns: The dataset version the resulting models were trained on, for
+    /// - Returns: The newest sample the resulting models were trained on, for
     ///   the caller to record once they are installed.
-    private func performTraining() throws -> Date {
+    private func performTraining() throws -> UUID? {
         let start = ContinuousClock.now
 
-        // One snapshot, so the samples trained on and the version reported back
-        // are guaranteed to describe the same dataset even if it grows mid-run.
-        let dataset = dataManager.dataset
-        let samples = dataset.samples
+        // One snapshot, so the samples trained on and the id reported back are
+        // guaranteed to describe the same dataset even if it grows mid-run.
+        let samples = dataManager.dataset.samples
         Logger.ml.info("Training on \(samples.count) samples")
 
         // SEQUENTIAL PREDICTION, stage 1: ISO model (scene features → log2 ISO).
@@ -145,6 +144,6 @@ class ModelTrainer {
         let elapsed = start.duration(to: .now)
         Logger.ml.info("Model training completed in \(elapsed.formatted(.units(allowed: [.seconds], width: .abbreviated, fractionalPart: .show(length: 1))))")
 
-        return dataset.lastUpdated
+        return samples.last?.id
     }
 }

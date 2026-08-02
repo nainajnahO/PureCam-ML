@@ -83,19 +83,35 @@ class TrainingDataManager {
         Logger.ml.info("Added training sample (\(self.dataset.samples.count) total)")
     }
 
-    /// Record that a training run finished against the dataset as it stood at
-    /// `version` — the `lastUpdated` read when the run started, not when it
-    /// ended. Samples added mid-run therefore stay unaccounted for and trigger
-    /// the next run, which is correct: the models that just landed never saw them.
+    /// Record that a training run finished against the dataset as it stood when
+    /// the run *started* — `sampleID` is the newest sample it snapshotted, not
+    /// the newest one now. Samples added mid-run therefore stay unaccounted for
+    /// and trigger the next run, which is correct: the models that just landed
+    /// never saw them.
     ///
     /// A failed save is left alone. It only costs one redundant run on the next
     /// trigger, which is the direction to fail in — the alternative is believing
     /// the models are current when nothing on disk says so.
-    func markTrained(through version: Date) {
-        dataset.trainedThrough = version
+    func markTrained(throughSampleID sampleID: UUID?) {
+        dataset.trainedThroughSampleID = sampleID
         if !saveDataset() {
             Logger.ml.error("Trained models installed but freshness marker not saved — will retrain")
         }
+    }
+
+    /// Forget which sample the installed models were trained through.
+    ///
+    /// The marker is a claim about the two files on disk, and the freshness gate
+    /// reads it having only checked that they *exist*. A model that fails to
+    /// load disproves the claim, so clearing it is what routes the rebuild back
+    /// through the ordinary staleness path — no second notion of "needs
+    /// training" in the gate, and no reliance on a new sample arriving, which a
+    /// user with training-data contribution switched off would never produce.
+    func invalidateTrainedMarker() {
+        guard dataset.trainedThroughSampleID != nil else { return }
+        dataset.trainedThroughSampleID = nil
+        saveDataset()
+        Logger.ml.info("Installed models failed to load — freshness marker cleared, will rebuild")
     }
 
     /// The stored frame for a sample, if one was captured with it.

@@ -57,12 +57,18 @@ struct TrainingDataset: Codable {
     /// When the dataset was last modified
     var lastUpdated: Date
 
-    /// The `lastUpdated` this dataset carried when the installed models were
-    /// trained, or `nil` if no run has ever finished.
+    /// The newest sample the installed models were trained on, or `nil` if no
+    /// run has ever finished.
+    ///
+    /// An id rather than a timestamp because the dataset encodes with
+    /// `.iso8601`, which is second-resolution: a sample recorded in the same
+    /// second as the version a run trained on round-trips to an equal timestamp
+    /// and reads as already trained. A `UUID` survives JSON exactly, so the
+    /// comparison means what it says.
     ///
     /// Optional so datasets written before this existed decode as "never
     /// trained" and retrain once, rather than failing to decode and resetting.
-    var trainedThrough: Date?
+    var trainedThroughSampleID: UUID?
 
     init() {
         self.samples = []
@@ -105,13 +111,10 @@ struct TrainingDataset: Codable {
     /// i.e. whether training again would produce a model that knows anything the
     /// installed one doesn't.
     ///
-    /// Equality rather than `trainedThrough < lastUpdated` on purpose. Both sides
-    /// are the same stored value, so an exact match is precisely what "already
-    /// trained on this" means, and it stays reliable across a save/load — the
-    /// dataset encodes with `.iso8601`, which is second-resolution, so a
-    /// comparison between a truncated timestamp and an untruncated one would be
-    /// deciding on sub-second noise.
+    /// `addSample` is the only mutation, and it always appends, so the newest
+    /// sample's identity is a complete summary of "has anything arrived since".
+    /// Eviction drops from the front and therefore never disturbs it.
     var hasUntrainedSamples: Bool {
-        trainedThrough != lastUpdated
+        trainedThroughSampleID != samples.last?.id
     }
 }

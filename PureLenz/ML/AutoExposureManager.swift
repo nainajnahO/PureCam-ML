@@ -154,6 +154,16 @@ class AutoExposureManager {
                 self.isoModel = models?.iso
                 self.shutterModel = models?.shutter
                 self.state = newState
+
+                // The freshness gate only asks whether the two files exist, and
+                // a corrupt install passes that. This is the first point where
+                // "present" and "usable" are known to differ, so drop the marker
+                // that vouches for them — otherwise a dataset that never changes
+                // again (training-data contribution switched off) would leave
+                // these models unrebuilt for good.
+                if case .error = newState {
+                    self.dataManager.invalidateTrainedMarker()
+                }
             }
         }
     }
@@ -388,7 +398,11 @@ class AutoExposureManager {
         // Only train if device is charging
         let batteryState = UIDevice.current.batteryState
         guard batteryState == .charging || batteryState == .full else {
-            if dataManager.dataset.isReadyForTraining && dataManager.dataset.hasUntrainedSamples {
+            // Same condition as the freshness guard below, so the log describes
+            // what would actually happen once charging rather than a narrower
+            // version of it.
+            if dataManager.dataset.isReadyForTraining
+                && (dataManager.dataset.hasUntrainedSamples || !MLFiles.modelsInstalled) {
                 Logger.ml.debug("Ready to train (\(self.dataManager.dataset.samples.count) samples) but waiting for charging")
             }
             return
