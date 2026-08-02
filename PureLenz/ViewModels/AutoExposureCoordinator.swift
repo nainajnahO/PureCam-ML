@@ -158,7 +158,7 @@ class AutoExposureCoordinator: NSObject {
         // exposure; manual long-press inference (triggerManualInference) is unaffected.
         guard UserDefaults.standard.bool(forKey: "autoExposureOnLaunch") else {
             holdMeteredExposure()
-            Logger.ml.debug("Startup inference disabled - holding the metered exposure")
+            Logger.ml.info("Startup inference disabled - holding the metered exposure")
             return
         }
 
@@ -167,7 +167,7 @@ class AutoExposureCoordinator: NSObject {
             guard let frame = await self.cameraService.captureNextFrame() else {
                 await MainActor.run {
                     self.holdMeteredExposure()
-                    Logger.ml.debug("No preview frame available - holding the metered exposure")
+                    Logger.ml.info("No preview frame available - holding the metered exposure")
                 }
                 return
             }
@@ -178,7 +178,7 @@ class AutoExposureCoordinator: NSObject {
             } else {
                 await MainActor.run {
                     self.holdMeteredExposure()
-                    Logger.ml.debug("No trained model yet - holding the metered exposure")
+                    Logger.ml.info("No trained model yet - holding the metered exposure")
                 }
             }
         }

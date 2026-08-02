@@ -234,7 +234,9 @@ class CameraService: NSObject {
             // has rather than leaving the app sitting in auto indefinitely.
             let timeout = DispatchWorkItem { [weak self] in
                 guard let self, self.isSeedingExposure else { return }
-                Logger.camera.debug("One-shot metering did not settle in time - adopting current exposure")
+                // Notice, not debug: this is the fallback path silently taking
+                // over for the observation, which is worth seeing in field logs.
+                Logger.camera.notice("One-shot metering did not settle in time - adopting current exposure")
                 self.endExposureSeed()
                 self.adoptMeteredExposure(from: device)
             }
@@ -279,6 +281,9 @@ class CameraService: NSObject {
         DispatchQueue.main.async {
             let adoptedISO = self.roundToNearestISO(meteredISO)
             self.setCustomExposure(iso: adoptedISO, shutterSeconds: meteredShutter)
+            Logger.camera.info(
+                "Seeded exposure: ISO \(Int(adoptedISO)), shutter 1/\(Int(1 / meteredShutter))"
+            )
 
             // Report the values directly rather than letting the caller read
             // `currentISO`: `setCustomExposure` has not written them back yet.
