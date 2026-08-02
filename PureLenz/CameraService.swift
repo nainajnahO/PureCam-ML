@@ -39,6 +39,11 @@ class CameraService: NSObject {
     // Invalidated on deinit (also auto-invalidates when this token deallocates).
     private var rotationObservation: NSKeyValueObservation?
 
+    // Watches for the ISP reporting that the scene changed meaningfully, so a
+    // one-shot focus can hand back to continuous AF. Only armed while a tapped
+    // focus point is in effect (see `focus(at:)`).
+    private var subjectAreaObserver: NSObjectProtocol?
+
     // The in-flight one-shot metering pass started by `holdCurrentExposure()`.
     // Both are torn down the instant the app adopts the metered value, so
     // nothing here outlives the seed — see that method's doc comment for why
@@ -306,6 +311,96 @@ class CameraService: NSObject {
         }
     }
 
+
+    // MARK: - Focus
+
+    /// Focus once on a normalized sensor point.
+    ///
+    /// The point must already be in sensor coordinates — `CameraPreview` converts
+    /// the tap through `captureDevicePointConverted(fromLayerPoint:)`, which is the
+    /// only thing that knows about the preview's aspect-fill crop and fixed 90°
+    /// rotation. Passing a raw screen fraction here would focus the wrong place.
+    ///
+    /// **Focus only.** Apple's tap-to-focus also sets `exposurePointOfInterest` and
+    /// flips to `.continuousAutoExposure`. This deliberately does not: exposure is
+    /// owned by the app (`AutoExposureCoordinator` and the manual knob) via
+    /// `setExposureModeCustom`, so handing metering back to the ISP here would throw
+    /// away the model's decision on every tap.
+    func focus(at devicePoint: CGPoint) {
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            guard let input = self.session.inputs.first as? AVCaptureDeviceInput else { return }
+            let device = input.device
+
+            guard device.isFocusPointOfInterestSupported,
+                  device.isFocusModeSupported(.autoFocus) else { return }
+
+            do {
+                try device.lockForConfiguration()
+                device.focusPointOfInterest = devicePoint
+                device.focusMode = .autoFocus
+
+                // Ask the ISP to report when the scene changes meaningfully. This
+                // is a coarse "something is different now" signal, not object
+                // recognition — the same mechanism the stock Camera app uses to
+                // release a tapped focus.
+                device.isSubjectAreaChangeMonitoringEnabled = true
+                device.unlockForConfiguration()
+
+                self.observeSubjectAreaChange(on: device)
+            } catch {
+                Logger.camera.error("Failed to lock configuration for focus: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Arm the one-shot subject-area watch for the current tapped focus.
+    ///
+    /// Registered per tap and torn down as it fires, so this is never a standing
+    /// observation: between taps the app is not listening at all.
+    private func observeSubjectAreaChange(on device: AVCaptureDevice) {
+        removeSubjectAreaObserver()
+        subjectAreaObserver = NotificationCenter.default.addObserver(
+            forName: AVCaptureDevice.subjectAreaDidChangeNotification,
+            object: device,
+            queue: nil
+        ) { [weak self] _ in
+            self?.resumeContinuousAutoFocus()
+        }
+    }
+
+    private func removeSubjectAreaObserver() {
+        guard let observer = subjectAreaObserver else { return }
+        NotificationCenter.default.removeObserver(observer)
+        subjectAreaObserver = nil
+    }
+
+    /// Hand focus back to the device: continuous AF, point recentred, monitoring off.
+    private func resumeContinuousAutoFocus() {
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.removeSubjectAreaObserver()
+
+            guard let input = self.session.inputs.first as? AVCaptureDeviceInput else { return }
+            let device = input.device
+
+            guard device.isFocusModeSupported(.continuousAutoFocus) else { return }
+
+            do {
+                try device.lockForConfiguration()
+                if device.isFocusPointOfInterestSupported {
+                    device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
+                }
+                device.focusMode = .continuousAutoFocus
+                device.isSubjectAreaChangeMonitoringEnabled = false
+                device.unlockForConfiguration()
+            } catch {
+                Logger.camera.error(
+                    "Failed to lock configuration to resume continuous focus: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
 
     override init() {
         super.init()
@@ -642,6 +737,7 @@ class CameraService: NSObject {
         rotationObservation?.invalidate()
         exposureSeedObservation?.invalidate()
         exposureSeedTimeout?.cancel()
+        removeSubjectAreaObserver()
     }
 }
 

@@ -23,12 +23,22 @@ struct CameraFeedView: View {
     /// Surfaces the preview layer's true short-axis crop fraction up to the view
     /// model (see `CameraPreview`); drives the framing indicator's yellow box.
     var onCropFraction: ((CGFloat) -> Void)? = nil
+    /// The active focus reticle, drawn here rather than as a `ContentView`
+    /// overlay so it shares the preview's coordinate space — the tap point is
+    /// reported in the preview's own bounds.
+    var focusReticle: (point: CGPoint, token: UUID)? = nil
+    /// Surfaces a viewfinder tap, already converted to a sensor point (see `CameraPreview`).
+    var onFocusTap: ((CGPoint, CGPoint) -> Void)? = nil
 
     var body: some View {
         if cameraService.status == .configured {
             GeometryReader { geometry in
                 ZStack {
-                    CameraPreview(session: cameraService.session, onCropFraction: onCropFraction)
+                    CameraPreview(
+                        session: cameraService.session,
+                        onCropFraction: onCropFraction,
+                        onFocusTap: onFocusTap
+                    )
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .opacity(showRAWPreview ? 0 : 1)
 
@@ -43,6 +53,12 @@ struct CameraFeedView: View {
                             .frame(width: geometry.size.width, height: geometry.size.height)
                             .clipped()
                             .transition(.opacity)
+                    }
+
+                    if let focusReticle {
+                        FocusReticle()
+                            .position(focusReticle.point)
+                            .id(focusReticle.token)
                     }
                 }
             }

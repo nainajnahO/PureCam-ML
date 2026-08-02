@@ -55,6 +55,16 @@ class CameraViewModel {
     /// layer has laid out and reported.
     private(set) var previewCropFraction: CGFloat?
 
+    /// Where the last focus tap landed, in the viewfinder's own coordinates, plus
+    /// a token identifying that tap. The token gives the reticle a fresh SwiftUI
+    /// identity per tap, so tapping again restarts the animation instead of
+    /// inheriting the previous one's half-faded state.
+    private(set) var focusReticle: (point: CGPoint, token: UUID)?
+
+    /// Clears the reticle once it has finished fading; cancelled by a newer tap
+    /// so a stale timer cannot dismiss the current one.
+    private var focusReticleTask: Task<Void, Never>?
+
     // MARK: - Initialization
 
     init(cameraService: CameraService, hapticManager: HapticManager) {
@@ -78,6 +88,8 @@ class CameraViewModel {
             isCapturingPreview = false
             framingPreviewExpanded = false
             stopFramingPreviewLoop()
+            focusReticleTask?.cancel()
+            focusReticle = nil
         }
     }
 
@@ -152,6 +164,28 @@ class CameraViewModel {
     /// `CameraPreview`). Drives the framing indicator's yellow crop rectangle.
     func setPreviewCropFraction(_ fraction: CGFloat) {
         previewCropFraction = fraction
+    }
+
+    // MARK: - Focus
+
+    /// Handle a viewfinder tap: focus the lens there and show the reticle.
+    ///
+    /// Both points come from `CameraPreview`, which is the only place that can
+    /// convert between them correctly — `viewPoint` positions the reticle on
+    /// screen, `devicePoint` is the normalized sensor point focus needs.
+    ///
+    /// Exposure is untouched on purpose. See `CameraService.focus(at:)`.
+    func focusTapped(viewPoint: CGPoint, devicePoint: CGPoint) {
+        cameraService.focus(at: devicePoint)
+        hapticManager.impact(.light)
+
+        focusReticleTask?.cancel()
+        focusReticle = (point: viewPoint, token: UUID())
+        focusReticleTask = Task { [weak self] in
+            try? await Task.sleep(for: FocusReticle.lifetime)
+            guard let self, !Task.isCancelled else { return }
+            self.focusReticle = nil
+        }
     }
 
     /// Toggle the framing-indicator HUD between the small outline schematic and
