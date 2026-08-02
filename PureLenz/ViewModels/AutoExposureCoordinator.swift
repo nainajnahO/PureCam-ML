@@ -191,25 +191,30 @@ class AutoExposureCoordinator: NSObject {
     /// hold the metered exposure while the rings sat at their default, and the
     /// first nudge would snap the exposure down to that default.
     ///
+    /// Seeding `progress` rather than an angle is what makes that true here:
+    /// progress is accumulated across a drag, so a ring left at `0` does not
+    /// merely *look* wrong — the next `accumulate` starts from the bottom of
+    /// the arc and writes that value back to the camera.
+    ///
     /// Deliberately unlike `applyAIPrediction`: no exposure ramp, because the
     /// value is already applied, and no `isAIAnimating` glow, because a metered
     /// starting exposure is not a prediction and should not claim to be one.
     private func holdMeteredExposure() {
         cameraService.holdCurrentExposure { [weak self] iso, shutter in
             guard let self else { return }
-            let isoAngle = ExposureCalculator.angleFromISO(
+            let isoProgress = ExposureCalculator.progressFromISO(
                 iso,
                 min: self.cameraService.minISO,
                 max: self.cameraService.maxISO
             )
-            let shutterAngle = ExposureCalculator.angleFromShutter(
+            let shutterProgress = ExposureCalculator.progressFromShutter(
                 shutter,
                 min: self.cameraService.minShutterSpeed,
                 max: self.cameraService.maxShutterSpeed
             )
             withAnimation(.spring(duration: 0.4)) {
-                self.exposureControlVM.updateRotationAngle(control: .iso, angle: isoAngle)
-                self.exposureControlVM.updateRotationAngle(control: .shutter, angle: shutterAngle)
+                self.exposureControlVM.setProgress(control: .iso, progress: isoProgress)
+                self.exposureControlVM.setProgress(control: .shutter, progress: shutterProgress)
             }
         }
     }
