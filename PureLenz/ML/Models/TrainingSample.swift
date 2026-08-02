@@ -57,6 +57,13 @@ struct TrainingDataset: Codable {
     /// When the dataset was last modified
     var lastUpdated: Date
 
+    /// The `lastUpdated` this dataset carried when the installed models were
+    /// trained, or `nil` if no run has ever finished.
+    ///
+    /// Optional so datasets written before this existed decode as "never
+    /// trained" and retrain once, rather than failing to decode and resetting.
+    var trainedThrough: Date?
+
     init() {
         self.samples = []
         self.createdAt = Date()
@@ -92,5 +99,19 @@ struct TrainingDataset: Codable {
     /// Whether we have enough samples to start training
     var isReadyForTraining: Bool {
         samples.count >= 30
+    }
+
+    /// Whether the dataset has changed since the last successful training run,
+    /// i.e. whether training again would produce a model that knows anything the
+    /// installed one doesn't.
+    ///
+    /// Equality rather than `trainedThrough < lastUpdated` on purpose. Both sides
+    /// are the same stored value, so an exact match is precisely what "already
+    /// trained on this" means, and it stays reliable across a save/load — the
+    /// dataset encodes with `.iso8601`, which is second-resolution, so a
+    /// comparison between a truncated timestamp and an untruncated one would be
+    /// deciding on sub-second noise.
+    var hasUntrainedSamples: Bool {
+        trainedThrough != lastUpdated
     }
 }

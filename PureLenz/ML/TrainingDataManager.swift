@@ -83,6 +83,21 @@ class TrainingDataManager {
         Logger.ml.info("Added training sample (\(self.dataset.samples.count) total)")
     }
 
+    /// Record that a training run finished against the dataset as it stood at
+    /// `version` — the `lastUpdated` read when the run started, not when it
+    /// ended. Samples added mid-run therefore stay unaccounted for and trigger
+    /// the next run, which is correct: the models that just landed never saw them.
+    ///
+    /// A failed save is left alone. It only costs one redundant run on the next
+    /// trigger, which is the direction to fail in — the alternative is believing
+    /// the models are current when nothing on disk says so.
+    func markTrained(through version: Date) {
+        dataset.trainedThrough = version
+        if !saveDataset() {
+            Logger.ml.error("Trained models installed but freshness marker not saved — will retrain")
+        }
+    }
+
     /// The stored frame for a sample, if one was captured with it.
     ///
     /// Decode with `CIImage(data:)` and pass to `SceneFeatureExtractor.extract`,

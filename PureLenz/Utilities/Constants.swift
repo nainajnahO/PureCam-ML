@@ -59,6 +59,16 @@ enum MLFiles {
         URL.documentsDirectory.appendingPathComponent("trainingDataV3.json")
     }
 
+    /// Whether both compiled models are present on disk.
+    ///
+    /// Two `stat` calls, cheap enough to ask on the launch path. Distinct from
+    /// "a model is loaded": the load is asynchronous, so this answers the
+    /// question during the window where `state` is still `.loading`.
+    static var modelsInstalled: Bool {
+        FileManager.default.fileExists(atPath: isoModelURL.path)
+            && FileManager.default.fileExists(atPath: shutterModelURL.path)
+    }
+
     /// Directory holding one JPEG per training sample: the downsampled buffer
     /// feature extraction actually analysed, kept as raw material.
     ///
