@@ -116,7 +116,7 @@ class ExposureControlViewModel {
         // Trigger haptic when discrete ISO value changes
         if newISO != lastDiscreteISO {
             lastDiscreteISO = newISO
-            hapticManager.playISOClick()
+            hapticManager.playDetentClick()
         }
 
         // Apply new ISO (shutter stays fixed)
@@ -185,10 +185,45 @@ class ExposureControlViewModel {
     // MARK: - Stepped Adjustment
 
     /// Current ISO, rounded to the detent it sits on.
-    var currentISO: Float { cameraService.roundToNearestISO(cameraService.currentISO) }
+    ///
+    /// Derived from `isoProgress` rather than read back from the camera.
+    /// `setCustomExposure` hops main → sessionQueue → main, so the camera's copy
+    /// lags a round trip, and two VoiceOver steps arriving inside that window
+    /// would both compute from the same base — the second then landing on the
+    /// same detent and being dropped by the no-op guard in `stepISO`.
+    ///
+    /// Progress is already the source of truth for the dot, so deriving from it
+    /// also stops the spoken value and the dot position disagreeing.
+    ///
+    /// The range is `0...0` until `configureSession` runs, and `log(0)` would
+    /// make the mapping non-finite. Falling back to the camera's own value there
+    /// keeps this finite for `Int(...)` in the spoken readout — the conversion
+    /// that used to trap on the shutter side for the same reason.
+    var currentISO: Float {
+        guard cameraService.minISO > 0, cameraService.maxISO > 0 else {
+            return cameraService.roundToNearestISO(cameraService.currentISO)
+        }
+        return cameraService.roundToNearestISO(
+            ExposureCalculator.isoFromProgress(
+                isoProgress,
+                min: cameraService.minISO,
+                max: cameraService.maxISO
+            )
+        )
+    }
 
-    /// Current shutter speed in seconds.
-    var currentShutterSeconds: Double { cameraService.currentShutterSpeed }
+    /// Current shutter speed in seconds. Derived from `shutterProgress`, with
+    /// the same pre-configure fallback, for the same reasons as `currentISO`.
+    var currentShutterSeconds: Double {
+        guard cameraService.minShutterSpeed > 0, cameraService.maxShutterSpeed > 0 else {
+            return cameraService.currentShutterSpeed
+        }
+        return ExposureCalculator.shutterFromProgress(
+            shutterProgress,
+            min: cameraService.minShutterSpeed,
+            max: cameraService.maxShutterSpeed
+        )
+    }
 
     /// Move ISO by whole detents.
     ///
@@ -196,19 +231,50 @@ class ExposureControlViewModel {
     /// so a step always lands exactly on a supported value — the same places the
     /// drag gesture clicks through.
     func stepISO(by steps: Int) {
-        let detents = cameraService.isoDetents
-        guard let index = detents.firstIndex(of: currentISO) else { return }
+        // Before `configureSession` the range is still 0...0, which makes every
+        // derived value non-finite. VoiceOver can reach these dots in that
+        // window — the same window that used to make the shutter readout trap.
+        guard cameraService.minISO > 0, cameraService.maxISO > 0 else { return }
 
-        let target = detents[Swift.max(0, Swift.min(detents.count - 1, index + steps))]
-        guard target != currentISO else { return }
+        let detents = cameraService.isoDetents
+        let base = currentISO
+        guard let index = detents.firstIndex(of: base) else { return }
+
+        let requested = index + steps
+        let landed = Swift.max(0, Swift.min(detents.count - 1, requested))
+        let target = detents[landed]
+
+        // Report the wall before the no-op guard below, not after: a step that
+        // runs off the end lands back on the value it started from, so the guard
+        // would swallow the bump along with the move.
+        //
+        // Unlike the drag path this bumps on every step past the end rather than
+        // only on arrival. Each one is a separate deliberate press, and silence
+        // would be indistinguishable from the step being lost.
+        if landed != requested {
+            reportWall(hit: true)
+        }
+
+        guard target != base else { return }
 
         autoExposureManager.notifyManualOverride()
         isoProgress = ExposureCalculator.progressFromISO(
             target, min: cameraService.minISO, max: cameraService.maxISO
         )
+
+        // Same detent-changed event the drag path clicks on. Keeping
+        // `lastDiscreteISO` in step matters beyond the click itself: left stale,
+        // the next drag would compare against a value stepping had already moved
+        // past and fire a click on its first frame for a change it didn't make.
+        lastDiscreteISO = target
+        hapticManager.playDetentClick()
+
+        // Cross-write from this view model's own value, not the camera's: after
+        // a shutter step the camera is still a round trip behind, and passing
+        // its copy back would undo that step.
         cameraService.setCustomExposure(
             iso: target,
-            shutterSeconds: cameraService.currentShutterSpeed
+            shutterSeconds: currentShutterSeconds
         )
     }
 
@@ -216,13 +282,31 @@ class ExposureControlViewModel {
     func stepShutter(by steps: Int) {
         let low = cameraService.minShutterSpeed
         let high = cameraService.maxShutterSpeed
-        let scaled = currentShutterSeconds * pow(2.0, Double(steps) / 3.0)
+        // See `stepISO` — nothing to step along until the range exists.
+        guard low > 0, high > 0 else { return }
+
+        let base = currentShutterSeconds
+        let scaled = base * pow(2.0, Double(steps) / 3.0)
         let target = Swift.max(low, Swift.min(high, scaled))
-        guard target != currentShutterSeconds else { return }
+
+        // See `stepISO` — the clamp is what says an end was reached, and it has
+        // to be read before the no-op guard swallows it.
+        if target != scaled {
+            reportWall(hit: true)
+        }
+
+        guard target != base else { return }
 
         autoExposureManager.notifyManualOverride()
         shutterProgress = ExposureCalculator.progressFromShutter(target, min: low, max: high)
-        cameraService.setCustomExposure(iso: cameraService.currentISO, shutterSeconds: target)
+
+        // The drag path has no shutter click — it runs a continuous rumble that
+        // a discrete step is too brief to convey — so stepping borrows the
+        // detent click instead of leaving the step silent.
+        hapticManager.playDetentClick()
+
+        // Cross-write from this view model's value — see `stepISO`.
+        cameraService.setCustomExposure(iso: currentISO, shutterSeconds: target)
     }
 
     /// Place a knob at an absolute position, for the AI to drive it.

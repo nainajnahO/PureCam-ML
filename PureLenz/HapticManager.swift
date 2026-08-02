@@ -24,12 +24,18 @@ import OSLog
 /// UIFeedbackGenerator offers.
 final class HapticManager {
     private var engine: CHHapticEngine?
+
+    /// Cached player for the shutter rumble. Cached for the same reason as the
+    /// click below, but the trigger is different: pinning the knob against an
+    /// end stops the rumble and easing off restarts it, so a thumb held at the
+    /// wall crosses that boundary repeatedly. Building the pattern and player
+    /// per start meant one allocation per crossing.
     private var continuousPlayer: CHHapticAdvancedPatternPlayer?
 
-    /// Cached player for the ISO detent click. The pattern never changes and
+    /// Cached player for the detent click. The pattern never changes and
     /// clicks can fire ~10-20×/s during a fast drag, so it is built once (and
     /// rebuilt on engine reset) instead of per click.
-    private var isoClickPlayer: CHHapticPatternPlayer?
+    private var detentClickPlayer: CHHapticPatternPlayer?
 
     private var isRumbling = false
 
@@ -102,26 +108,31 @@ final class HapticManager {
             }
 
             // Handle engine reset — a reset invalidates existing players, so
-            // the cached click player is rebuilt along with the restart.
+            // both cached players are rebuilt along with the restart. A reset
+            // also leaves nothing playing, so the rumble flag has to drop or
+            // `startShutterRumble` would refuse to start the rebuilt player.
             engine?.resetHandler = { [weak self] in
                 Logger.haptics.debug("Haptic engine reset")
                 do {
                     try self?.engine?.start()
-                    self?.makeISOClickPlayer()
+                    self?.isRumbling = false
+                    self?.makeDetentClickPlayer()
+                    self?.makeShutterRumblePlayer()
                 } catch {
                     Logger.haptics.error("Failed to restart haptic engine: \(error.localizedDescription)")
                 }
             }
 
-            makeISOClickPlayer()
+            makeDetentClickPlayer()
+            makeShutterRumblePlayer()
         } catch {
             Logger.haptics.error("Failed to create haptic engine: \(error.localizedDescription)")
         }
     }
 
-    /// Build the cached ISO click player: a sharp, brief transient that feels
+    /// Build the cached detent click player: a sharp, brief transient that feels
     /// like a mechanical detent.
-    private func makeISOClickPlayer() {
+    private func makeDetentClickPlayer() {
         guard let engine else { return }
 
         let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.4)
@@ -134,20 +145,44 @@ final class HapticManager {
 
         do {
             let pattern = try CHHapticPattern(events: [event], parameters: [])
-            isoClickPlayer = try engine.makePlayer(with: pattern)
+            detentClickPlayer = try engine.makePlayer(with: pattern)
         } catch {
-            Logger.haptics.error("Failed to create ISO click player: \(error.localizedDescription)")
+            Logger.haptics.error("Failed to create detent click player: \(error.localizedDescription)")
         }
     }
 
-    // MARK: - ISO Haptics (Discrete Clicks)
+    /// Build the cached shutter rumble player: one sustained event whose
+    /// intensity and sharpness are driven live by `updateShutterRumble`.
+    private func makeShutterRumblePlayer() {
+        guard let engine else { return }
 
-    /// Play a discrete click haptic for ISO value changes
-    func playISOClick() {
+        let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.35)
+        let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.5)
+
+        let event = CHHapticEvent(
+            eventType: .hapticContinuous,
+            parameters: [intensity, sharpness],
+            relativeTime: 0,
+            duration: 30.0 // Long duration, we'll stop it manually
+        )
+
         do {
-            try isoClickPlayer?.start(atTime: CHHapticTimeImmediate)
+            let pattern = try CHHapticPattern(events: [event], parameters: [])
+            continuousPlayer = try engine.makeAdvancedPlayer(with: pattern)
         } catch {
-            Logger.haptics.error("Failed to play ISO click: \(error.localizedDescription)")
+            Logger.haptics.error("Failed to create shutter rumble player: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Detent Haptics (Discrete Clicks)
+
+    /// Play a discrete click haptic for a detent change — ISO on the drag path,
+    /// and either control when VoiceOver steps it.
+    func playDetentClick() {
+        do {
+            try detentClickPlayer?.start(atTime: CHHapticTimeImmediate)
+        } catch {
+            Logger.haptics.error("Failed to play detent click: \(error.localizedDescription)")
         }
     }
 
@@ -156,27 +191,11 @@ final class HapticManager {
     /// Start continuous rumble for shutter speed adjustment
     /// Intensity increases with drag velocity
     func startShutterRumble() {
-        guard let engine = engine else { return }
-        guard !isRumbling else { return }
+        guard !isRumbling, let continuousPlayer else { return }
 
         do {
-            // Create a continuous haptic event (sustained rumble)
-            let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.35)
-            let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.5)
-
-            let event = CHHapticEvent(
-                eventType: .hapticContinuous,
-                parameters: [intensity, sharpness],
-                relativeTime: 0,
-                duration: 30.0 // Long duration, we'll stop it manually
-            )
-
-            let pattern = try CHHapticPattern(events: [event], parameters: [])
-            continuousPlayer = try engine.makeAdvancedPlayer(with: pattern)
-
-            try continuousPlayer?.start(atTime: CHHapticTimeImmediate)
+            try continuousPlayer.start(atTime: CHHapticTimeImmediate)
             isRumbling = true
-
         } catch {
             Logger.haptics.error("Failed to start shutter rumble: \(error.localizedDescription)")
         }
@@ -213,13 +232,14 @@ final class HapticManager {
     }
 
     /// Stop continuous rumble for shutter speed
+    /// The player is kept, not discarded: it is restarted every time the knob
+    /// eases off an end, and rebuilding it there was the churn this avoids.
     func stopShutterRumble() {
-        guard isRumbling else { return }
+        guard isRumbling, let continuousPlayer else { return }
 
         do {
-            try continuousPlayer?.stop(atTime: CHHapticTimeImmediate)
+            try continuousPlayer.stop(atTime: CHHapticTimeImmediate)
             isRumbling = false
-            continuousPlayer = nil
         } catch {
             Logger.haptics.error("Failed to stop shutter rumble: \(error.localizedDescription)")
         }
