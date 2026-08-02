@@ -39,6 +39,15 @@ class CameraService: NSObject {
     // Invalidated on deinit (also auto-invalidates when this token deallocates).
     private var rotationObservation: NSKeyValueObservation?
 
+    // The in-flight one-shot metering pass started by `holdCurrentExposure()`.
+    // Both are torn down the instant the app adopts the metered value, so
+    // nothing here outlives the seed — see that method's doc comment for why
+    // this is not the "follow the camera forever" observation the design
+    // deliberately avoids. All three are touched only on `sessionQueue`.
+    private var exposureSeedObservation: NSKeyValueObservation?
+    private var exposureSeedTimeout: DispatchWorkItem?
+    private var isSeedingExposure = false
+
     // Video output for live frame capture (for ML feature extraction)
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let videoOutputQueue = DispatchQueue(label: "com.purelenz.videoOutputQueue")
@@ -147,15 +156,29 @@ class CameraService: NSObject {
         }
     }
     
-    /// Take over whatever exposure the device has metered and hold it.
+    /// Meter the scene once, then take that exposure over and hold it.
     ///
     /// This is the app's starting exposure, and it replaces the old
-    /// `resetAutoExposure()`. iOS auto-exposure now runs only during the camera
-    /// warmup that precedes this call — it is a *seed*, never a resting state.
-    /// Reading its settled result and re-applying it through
-    /// `setCustomExposure` is the whole point: every exposure the camera holds
-    /// is then one this app set, so `currentISO` / `currentShutterSpeed` are
-    /// correct by construction and cannot drift behind the app's back.
+    /// `resetAutoExposure()`. `.autoExpose` is AVFoundation's one-shot: the
+    /// device meters the scene a single time and moves itself to `.locked`. We
+    /// wait for that, read what it chose, and immediately re-apply it through
+    /// `setCustomExposure`. iOS auto-exposure is a *seed*, never a resting
+    /// state — every exposure the camera holds is then one this app set, so
+    /// `currentISO` / `currentShutterSpeed` are correct by construction and
+    /// cannot drift behind the app's back.
+    ///
+    /// **Why a fresh `.autoExpose` rather than just reading the device.**
+    /// Once this has run, the device sits in `.custom` and is not metering
+    /// anything. Reading `device.iso` on a later launch would hand back the
+    /// value *we* set last time, which is "restore the last exposure" — good
+    /// in the same room, useless after the user has walked outside. Only a new
+    /// metering pass reflects the scene actually in front of the camera.
+    ///
+    /// **Why the observation below is not the one this design avoids.** The
+    /// hazard is *permanently* trailing a value that drifts, because then the
+    /// app can never be sure its copy is current. This observation ends the
+    /// moment the app takes the value over, after which nothing drifts —
+    /// there is exactly one writer.
     ///
     /// ISO is snapped to the nearest detent because the manual knob only offers
     /// detents — holding an off-table value would leave the knob unable to find
@@ -166,21 +189,85 @@ class CameraService: NSObject {
             guard let input = self.session.inputs.first as? AVCaptureDeviceInput else { return }
             let device = input.device
 
-            // Taken mid-adjustment this is a slightly early reading rather than
-            // a wrong one, and it is only a starting value — not worth waiting
-            // on `isAdjustingExposure` for.
-            let meteredISO = device.iso
-            let meteredShutter = device.exposureDuration.seconds
+            // A fast background/foreground cycle can land here twice; the
+            // newer pass replaces the older one.
+            self.endExposureSeed()
 
-            // Hop to main to round: `isoDetents` is written on the main thread
-            // (see configureSession) and must not be read from this queue.
-            // `setCustomExposure` dispatches back to sessionQueue itself.
-            DispatchQueue.main.async {
-                self.setCustomExposure(
-                    iso: self.roundToNearestISO(meteredISO),
-                    shutterSeconds: meteredShutter
-                )
+            guard device.isExposureModeSupported(.autoExpose) else {
+                self.adoptMeteredExposure(from: device)
+                return
             }
+
+            do {
+                try device.lockForConfiguration()
+                device.exposureMode = .autoExpose
+                device.unlockForConfiguration()
+            } catch {
+                Logger.camera.error("Failed to start one-shot metering: \(error.localizedDescription)")
+                self.adoptMeteredExposure(from: device)
+                return
+            }
+
+            self.isSeedingExposure = true
+
+            // Wait on `exposureMode` reaching `.locked` rather than on
+            // `isAdjustingExposure`: the mode is a one-way transition, so there
+            // is no ordering race, whereas the flag flicks true-then-false and
+            // may not have gone true yet at the moment we start observing.
+            self.exposureSeedObservation = device.observe(\.exposureMode, options: [.new]) { [weak self] device, _ in
+                guard let self else { return }
+                self.sessionQueue.async { self.finishExposureSeed(device: device) }
+            }
+
+            // If metering never reports finishing, adopt whatever the device
+            // has rather than leaving the app sitting in auto indefinitely.
+            let timeout = DispatchWorkItem { [weak self] in
+                guard let self, self.isSeedingExposure else { return }
+                Logger.camera.debug("One-shot metering did not settle in time - adopting current exposure")
+                self.endExposureSeed()
+                self.adoptMeteredExposure(from: device)
+            }
+            self.exposureSeedTimeout = timeout
+            self.sessionQueue.asyncAfter(deadline: .now() + 1.0, execute: timeout)
+
+            // It may already have settled in the gap before the observation
+            // was installed.
+            self.finishExposureSeed(device: device)
+        }
+    }
+
+    /// Complete a one-shot metering pass, if one is still in flight and the
+    /// device has finished. Idempotent — the observation, the timeout and the
+    /// post-install check all funnel through here.
+    private func finishExposureSeed(device: AVCaptureDevice) {
+        guard isSeedingExposure, device.exposureMode == .locked else { return }
+        endExposureSeed()
+        adoptMeteredExposure(from: device)
+    }
+
+    /// Mark that no metering pass is in flight and tear down what backed it.
+    private func endExposureSeed() {
+        isSeedingExposure = false
+        exposureSeedObservation?.invalidate()
+        exposureSeedObservation = nil
+        exposureSeedTimeout?.cancel()
+        exposureSeedTimeout = nil
+    }
+
+    /// Re-apply what the device metered as a custom exposure, so the value the
+    /// camera holds is one this app set.
+    private func adoptMeteredExposure(from device: AVCaptureDevice) {
+        let meteredISO = device.iso
+        let meteredShutter = device.exposureDuration.seconds
+
+        // Hop to main to round: `isoDetents` is written on the main thread
+        // (see configureSession) and must not be read from this queue.
+        // `setCustomExposure` dispatches back to sessionQueue itself.
+        DispatchQueue.main.async {
+            self.setCustomExposure(
+                iso: self.roundToNearestISO(meteredISO),
+                shutterSeconds: meteredShutter
+            )
         }
     }
 
@@ -518,6 +605,8 @@ class CameraService: NSObject {
 
     deinit {
         rotationObservation?.invalidate()
+        exposureSeedObservation?.invalidate()
+        exposureSeedTimeout?.cancel()
     }
 }
 
