@@ -76,7 +76,11 @@ class ModelTrainer {
 
             DispatchQueue.main.async {
                 switch result {
-                case .success:
+                case .success(let trainedThroughSampleID):
+                    // Marked here rather than on the training queue so every
+                    // mutation of the dataset happens on main, alongside
+                    // `addSample`.
+                    dataManager.markTrained(throughSampleID: trainedThroughSampleID)
                     NotificationCenter.default.post(name: .mlModelUpdated, object: nil)
                 case .failure(let error):
                     Logger.ml.error("Model training failed: \(error.localizedDescription)")
@@ -91,8 +95,14 @@ class ModelTrainer {
 
     /// Train synchronously (called on a background queue by `train`). Throws on
     /// any failure so the caller can report it.
-    private func performTraining() throws {
+    ///
+    /// - Returns: The newest sample the resulting models were trained on, for
+    ///   the caller to record once they are installed.
+    private func performTraining() throws -> UUID? {
         let start = ContinuousClock.now
+
+        // One snapshot, so the samples trained on and the id reported back are
+        // guaranteed to describe the same dataset even if it grows mid-run.
         let samples = dataManager.dataset.samples
         Logger.ml.info("Training on \(samples.count) samples")
 
@@ -133,5 +143,7 @@ class ModelTrainer {
 
         let elapsed = start.duration(to: .now)
         Logger.ml.info("Model training completed in \(elapsed.formatted(.units(allowed: [.seconds], width: .abbreviated, fractionalPart: .show(length: 1))))")
+
+        return samples.last?.id
     }
 }

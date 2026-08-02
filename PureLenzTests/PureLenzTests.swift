@@ -625,6 +625,166 @@ struct TrainingDatasetEvictionTests {
     }
 }
 
+/// Training used to re-run on every launch-while-charging and every plug-in,
+/// rebuilding both regressors from a dataset that hadn't changed. These cover
+/// the state that decides whether a run has anything to add.
+@Suite("Training freshness")
+struct TrainingFreshnessTests {
+    private func sample() -> TrainingSample {
+        TrainingSample(
+            features: SceneFeatures(
+                meanLuminance: 0.5, medianLuminance: 0.5, minLuminance: 0, maxLuminance: 1,
+                stdDevLuminance: 0.2, shadowsPercent: 0.2, midtonesPercent: 0.6,
+                highlightsPercent: 0.2, clippedHighlightsPercent: 0.01,
+                clippedShadowsPercent: 0.01, colorTemperature: 5500, saturation: 0.3,
+                centerWeightedLuminance: 0.5, sceneLightLevel: 3.3, timestamp: Date()
+            ),
+            iso: 64,
+            shutterSeconds: 1.0 / 256.0
+        )
+    }
+
+    /// A dataset that has never been trained must train, whatever its age.
+    /// Round-trip through the same encoder configuration `TrainingDataManager`
+    /// uses, so anything that survives here survives a real save/load.
+    private func roundTrip(_ dataset: TrainingDataset) throws -> TrainingDataset {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(TrainingDataset.self, from: encoder.encode(dataset))
+    }
+
+    @Test("an untrained dataset has work to do")
+    func untrainedDatasetNeedsTraining() {
+        var dataset = TrainingDataset()
+        dataset.addSample(sample())
+
+        #expect(dataset.trainedThroughSampleID == nil)
+        #expect(dataset.hasUntrainedSamples)
+    }
+
+    /// The bug: relaunching while charging retrained byte-identical input.
+    @Test("a dataset already trained through its newest sample has nothing to add")
+    func trainedDatasetIsUpToDate() {
+        var dataset = TrainingDataset()
+        dataset.addSample(sample())
+
+        dataset.trainedThroughSampleID = dataset.samples.last?.id
+
+        #expect(!dataset.hasUntrainedSamples)
+    }
+
+    @Test("a sample recorded after a run makes the dataset stale again")
+    func newSampleInvalidatesTraining() {
+        var dataset = TrainingDataset()
+        dataset.addSample(sample())
+        dataset.trainedThroughSampleID = dataset.samples.last?.id
+
+        dataset.addSample(sample())
+
+        #expect(dataset.hasUntrainedSamples)
+    }
+
+    /// `ModelTrainer` snapshots the samples before fitting and reports the
+    /// newest of *those* back, so a sample recorded while the run was in flight
+    /// is not covered by it. Marking the run with whatever is newest at the
+    /// finish would swallow that sample, and since `wantsTrainingSample` goes
+    /// false once the models load, nothing would trigger a retrain to pick it up.
+    @Test("a sample recorded mid-run is not covered by that run")
+    func sampleAddedDuringTrainingSurvives() {
+        var dataset = TrainingDataset()
+        dataset.addSample(sample())
+
+        // Run starts: the trainer snapshots the dataset as it stands now.
+        let snapshotNewest = dataset.samples.last?.id
+
+        // User keeps shooting while the fit runs.
+        dataset.addSample(sample())
+
+        // Run finishes and reports the newest sample it actually trained on.
+        dataset.trainedThroughSampleID = snapshotNewest
+
+        #expect(dataset.hasUntrainedSamples)
+    }
+
+    /// Regression: the marker used to be `lastUpdated`, and the dataset encodes
+    /// with `.iso8601` — whole seconds. Two samples either side of a run land in
+    /// the same second often enough to matter (a 399-sample fit takes ~0.2s), and
+    /// their timestamps then round-tripped to the same string, so the second
+    /// sample read as already trained and was dropped from every later run.
+    /// Identity has no such resolution.
+    @Test("a sample recorded in the same second as the trained one still counts")
+    func sameSecondSampleSurvivesRoundTrip() throws {
+        var dataset = TrainingDataset()
+        dataset.addSample(sample())
+
+        // Run completes against the dataset as it stands.
+        dataset.trainedThroughSampleID = dataset.samples.last?.id
+
+        // Second capture, immediately after — same wall-clock second.
+        dataset.addSample(sample())
+        #expect(dataset.hasUntrainedSamples)
+
+        #expect(try roundTrip(dataset).hasUntrainedSamples)
+    }
+
+    @Test("freshness survives a save/load round-trip")
+    func freshnessSurvivesEncoding() throws {
+        var dataset = TrainingDataset()
+        dataset.addSample(sample())
+        dataset.trainedThroughSampleID = dataset.samples.last?.id
+
+        #expect(!(try roundTrip(dataset).hasUntrainedSamples))
+    }
+
+    /// Eviction drops from the front, so it can never remove the sample the
+    /// marker names — the marker would otherwise go stale on a cap change and
+    /// force a rebuild that has nothing to add.
+    @Test("eviction does not disturb the marker")
+    func evictionKeepsMarkerValid() {
+        var dataset = TrainingDataset()
+        dataset.addSample(sample(), maxSamples: 2)
+        dataset.addSample(sample(), maxSamples: 2)
+        dataset.trainedThroughSampleID = dataset.samples.last?.id
+
+        // Third capture evicts the oldest and becomes the newest itself.
+        let evicted = dataset.addSample(sample(), maxSamples: 2)
+
+        #expect(evicted.count == 1)
+        #expect(dataset.samples.count == 2)
+        #expect(dataset.hasUntrainedSamples)
+    }
+
+    /// Datasets written before the marker existed must decode rather than fail
+    /// and reset the user's samples. They train once, then settle.
+    @Test("a dataset from before the marker existed decodes as never-trained")
+    func legacyDatasetDecodes() throws {
+        var dataset = TrainingDataset()
+        dataset.addSample(sample())
+        dataset.trainedThroughSampleID = dataset.samples.last?.id
+
+        // Strip the marker key to produce a file as an older build would write it.
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var json = try JSONSerialization.jsonObject(
+            with: encoder.encode(dataset)
+        ) as! [String: Any]
+        json.removeValue(forKey: "trainedThroughSampleID")
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let restored = try decoder.decode(
+            TrainingDataset.self,
+            from: JSONSerialization.data(withJSONObject: json)
+        )
+
+        #expect(restored.samples.count == 1)
+        #expect(restored.trainedThroughSampleID == nil)
+        #expect(restored.hasUntrainedSamples)
+    }
+}
+
 @Suite("Rec. 709 luminance weighting")
 struct LuminanceWeightingTests {
     private func meanLuminance(ofSolid colour: CIColor) throws -> Float {

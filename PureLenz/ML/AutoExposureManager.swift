@@ -122,8 +122,7 @@ class AutoExposureManager {
         let isoURL = MLFiles.isoModelURL
         let shutterURL = MLFiles.shutterModelURL
 
-        guard FileManager.default.fileExists(atPath: isoURL.path),
-              FileManager.default.fileExists(atPath: shutterURL.path) else {
+        guard MLFiles.modelsInstalled else {
             isoModel = nil
             shutterModel = nil
             state = .disabled
@@ -155,6 +154,16 @@ class AutoExposureManager {
                 self.isoModel = models?.iso
                 self.shutterModel = models?.shutter
                 self.state = newState
+
+                // The freshness gate only asks whether the two files exist, and
+                // a corrupt install passes that. This is the first point where
+                // "present" and "usable" are known to differ, so drop the marker
+                // that vouches for them — otherwise a dataset that never changes
+                // again (training-data contribution switched off) would leave
+                // these models unrebuilt for good.
+                if case .error = newState {
+                    self.dataManager.invalidateTrainedMarker()
+                }
             }
         }
     }
@@ -377,12 +386,23 @@ class AutoExposureManager {
         }
     }
 
-    /// Check conditions and trigger training if appropriate
+    /// Check conditions and trigger training if appropriate.
+    ///
+    /// Two of the three callers — `init` and `handleBatteryStateChange` — fire on
+    /// events that imply nothing about new data, so without the freshness check
+    /// below every launch-while-charging and every plug-in retrained the same
+    /// dataset into the same two models. That cost lands on the launch path,
+    /// scales with the sample cap, and briefly unlinks a perfectly good model
+    /// while the freshly built one is copied over it.
     private func checkAndTriggerTrainingIfNeeded() {
         // Only train if device is charging
         let batteryState = UIDevice.current.batteryState
         guard batteryState == .charging || batteryState == .full else {
-            if dataManager.dataset.isReadyForTraining {
+            // Same condition as the freshness guard below, so the log describes
+            // what would actually happen once charging rather than a narrower
+            // version of it.
+            if dataManager.dataset.isReadyForTraining
+                && (dataManager.dataset.hasUntrainedSamples || !MLFiles.modelsInstalled) {
                 Logger.ml.debug("Ready to train (\(self.dataManager.dataset.samples.count) samples) but waiting for charging")
             }
             return
@@ -390,6 +410,16 @@ class AutoExposureManager {
 
         // Must have enough samples
         guard dataManager.dataset.isReadyForTraining else {
+            return
+        }
+
+        // Nothing has changed since the last run, so a run now would rebuild the
+        // same models from the same rows. The installed-models check is what
+        // keeps that from stranding a dataset whose models went missing without
+        // the dataset itself changing — no marker on disk can vouch for a model
+        // that isn't there.
+        guard dataManager.dataset.hasUntrainedSamples || !MLFiles.modelsInstalled else {
+            Logger.ml.debug("Skipping training: models already trained on all \(self.dataManager.dataset.samples.count) samples")
             return
         }
 

@@ -57,6 +57,19 @@ struct TrainingDataset: Codable {
     /// When the dataset was last modified
     var lastUpdated: Date
 
+    /// The newest sample the installed models were trained on, or `nil` if no
+    /// run has ever finished.
+    ///
+    /// An id rather than a timestamp because the dataset encodes with
+    /// `.iso8601`, which is second-resolution: a sample recorded in the same
+    /// second as the version a run trained on round-trips to an equal timestamp
+    /// and reads as already trained. A `UUID` survives JSON exactly, so the
+    /// comparison means what it says.
+    ///
+    /// Optional so datasets written before this existed decode as "never
+    /// trained" and retrain once, rather than failing to decode and resetting.
+    var trainedThroughSampleID: UUID?
+
     init() {
         self.samples = []
         self.createdAt = Date()
@@ -92,5 +105,16 @@ struct TrainingDataset: Codable {
     /// Whether we have enough samples to start training
     var isReadyForTraining: Bool {
         samples.count >= 30
+    }
+
+    /// Whether the dataset has changed since the last successful training run,
+    /// i.e. whether training again would produce a model that knows anything the
+    /// installed one doesn't.
+    ///
+    /// `addSample` is the only mutation, and it always appends, so the newest
+    /// sample's identity is a complete summary of "has anything arrived since".
+    /// Eviction drops from the front and therefore never disturbs it.
+    var hasUntrainedSamples: Bool {
+        trainedThroughSampleID != samples.last?.id
     }
 }
