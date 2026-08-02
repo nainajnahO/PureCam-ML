@@ -52,6 +52,10 @@ struct FocusReticle: View {
             // The reticle sits over the viewfinder, so it must never swallow the
             // next tap.
             .allowsHitTesting(false)
+            // Purely decorative — the focus it marks is not an element to
+            // navigate to, so it should not appear in the VoiceOver rotor for
+            // the second-and-a-bit it is on screen.
+            .accessibilityHidden(true)
             .onAppear {
                 withAnimation(.easeOut(duration: Self.appearDuration)) {
                     scale = 1

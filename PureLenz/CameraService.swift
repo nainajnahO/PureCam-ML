@@ -40,8 +40,8 @@ class CameraService: NSObject {
     private var rotationObservation: NSKeyValueObservation?
 
     // Watches for the ISP reporting that the scene changed meaningfully, so a
-    // one-shot focus can hand back to continuous AF. Only armed while a tapped
-    // focus point is in effect (see `focus(at:)`).
+    // tapped focus can hand back to continuous AF. Registered once for the
+    // session's lifetime (see `configureSession`), not per tap.
     private var subjectAreaObserver: NSObjectProtocol?
 
     // The in-flight one-shot metering pass started by `holdCurrentExposure()`.
@@ -340,32 +340,17 @@ class CameraService: NSObject {
                 device.focusPointOfInterest = devicePoint
                 device.focusMode = .autoFocus
 
-                // Ask the ISP to report when the scene changes meaningfully. This
-                // is a coarse "something is different now" signal, not object
-                // recognition — the same mechanism the stock Camera app uses to
-                // release a tapped focus.
+                // Ask the ISP to report when the scene changes meaningfully — a
+                // coarse "something is different now" signal, not object
+                // recognition, and the same mechanism the stock Camera app uses
+                // to release a tapped focus. This flag is the only switch that
+                // matters: nothing is posted while it is off, and the listener
+                // itself already stands for the whole session (`configureSession`).
                 device.isSubjectAreaChangeMonitoringEnabled = true
                 device.unlockForConfiguration()
-
-                self.observeSubjectAreaChange(on: device)
             } catch {
                 Logger.camera.error("Failed to lock configuration for focus: \(error.localizedDescription)")
             }
-        }
-    }
-
-    /// Arm the one-shot subject-area watch for the current tapped focus.
-    ///
-    /// Registered per tap and torn down as it fires, so this is never a standing
-    /// observation: between taps the app is not listening at all.
-    private func observeSubjectAreaChange(on device: AVCaptureDevice) {
-        removeSubjectAreaObserver()
-        subjectAreaObserver = NotificationCenter.default.addObserver(
-            forName: AVCaptureDevice.subjectAreaDidChangeNotification,
-            object: device,
-            queue: nil
-        ) { [weak self] _ in
-            self?.resumeContinuousAutoFocus()
         }
     }
 
@@ -376,11 +361,25 @@ class CameraService: NSObject {
     }
 
     /// Hand focus back to the device: continuous AF, point recentred, monitoring off.
-    private func resumeContinuousAutoFocus() {
+    ///
+    /// Idempotent, and safe to call when no tapped focus is in effect — which is
+    /// what lets both callers share it: the subject-area observer, and the app
+    /// leaving the foreground.
+    ///
+    /// **Why leaving the foreground releases focus.** A tapped focus is transient
+    /// state, exactly like the reticle that marks it. Surviving a glance at
+    /// Control Center would leave the lens locked at a distance the user can no
+    /// longer see marked — and `AutoExposureCoordinator` re-establishes exposure
+    /// on every return to active, so focus outliving the trip would make it the
+    /// one piece of camera state that silently persists.
+    ///
+    /// Nothing here tears the observer down. Leaving it standing is what makes
+    /// the two failure paths below retry-able: if this call cannot reconfigure
+    /// the device, monitoring stays on and the next notification tries again,
+    /// rather than stranding the lens with nobody listening.
+    func releaseFocus() {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
-            self.removeSubjectAreaObserver()
-
             guard let input = self.session.inputs.first as? AVCaptureDeviceInput else { return }
             let device = input.device
 
@@ -527,7 +526,25 @@ class CameraService: NSObject {
                 let angle = coordinator.videoRotationAngleForHorizonLevelCapture
                 DispatchQueue.main.async { self?.setDeviceOrientation(forCaptureAngle: angle) }
             }
-            
+
+            // Listen for subject-area changes for the whole session rather than
+            // arming a fresh observer per tap.
+            //
+            // `isSubjectAreaChangeMonitoringEnabled` is the real on/off switch —
+            // nothing is posted while it is false — so a per-tap registration
+            // would receive no fewer notifications, and would open a window
+            // between enabling monitoring and starting to listen. That window is
+            // not theoretical: the focus scan a tap kicks off is itself a large
+            // change to the image, so the notification tends to arrive right
+            // then, and a missed one leaves the lens locked until the next tap.
+            subjectAreaObserver = NotificationCenter.default.addObserver(
+                forName: AVCaptureDevice.subjectAreaDidChangeNotification,
+                object: camera,
+                queue: .main
+            ) { [weak self] _ in
+                self?.releaseFocus()
+            }
+
             if session.canAddOutput(output) {
                 session.addOutput(output)
 

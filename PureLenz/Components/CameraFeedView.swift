@@ -28,7 +28,7 @@ struct CameraFeedView: View {
     /// reported in the preview's own bounds.
     var focusReticle: (point: CGPoint, token: UUID)? = nil
     /// Surfaces a viewfinder tap, already converted to a sensor point (see `CameraPreview`).
-    var onFocusTap: ((CGPoint, CGPoint) -> Void)? = nil
+    var onFocusTap: ((_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)? = nil
 
     var body: some View {
         if cameraService.status == .configured {

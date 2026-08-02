@@ -90,6 +90,11 @@ class CameraViewModel {
             stopFramingPreviewLoop()
             focusReticleTask?.cancel()
             focusReticle = nil
+            // Release the lens too, not just the marker for it. `.inactive`
+            // covers brief interruptions — Control Center, a banner, the app
+            // switcher — so leaving focus locked would mean returning to a lens
+            // held at a distance with nothing on screen saying so.
+            cameraService.releaseFocus()
         }
     }
 
