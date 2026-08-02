@@ -48,6 +48,11 @@ class CameraService: NSObject {
     private var exposureSeedTimeout: DispatchWorkItem?
     private var isSeedingExposure = false
 
+    // Reported on the main queue with the exposure a seed settled on, so the UI
+    // can move the rings to where the camera actually is. Cleared as it fires;
+    // a seed superseded by a newer one never reports.
+    private var exposureSeedCompletion: ((Float, Double) -> Void)?
+
     // Video output for live frame capture (for ML feature extraction)
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let videoOutputQueue = DispatchQueue(label: "com.purelenz.videoOutputQueue")
@@ -183,7 +188,12 @@ class CameraService: NSObject {
     /// ISO is snapped to the nearest detent because the manual knob only offers
     /// detents — holding an off-table value would leave the knob unable to find
     /// its own position. The resulting shift is at most 1/6 stop.
-    func holdCurrentExposure() {
+    ///
+    /// - Parameter onApplied: Called on the main queue with the exposure that
+    ///   was adopted. The rings do not track the camera on their own, so
+    ///   without this they would sit at their default while the camera holds
+    ///   something else — and the first nudge would jump to that default.
+    func holdCurrentExposure(then onApplied: ((Float, Double) -> Void)? = nil) {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             guard let input = self.session.inputs.first as? AVCaptureDeviceInput else { return }
@@ -192,6 +202,7 @@ class CameraService: NSObject {
             // A fast background/foreground cycle can land here twice; the
             // newer pass replaces the older one.
             self.endExposureSeed()
+            self.exposureSeedCompletion = onApplied
 
             guard device.isExposureModeSupported(.autoExpose) else {
                 self.adoptMeteredExposure(from: device)
@@ -259,15 +270,19 @@ class CameraService: NSObject {
     private func adoptMeteredExposure(from device: AVCaptureDevice) {
         let meteredISO = device.iso
         let meteredShutter = device.exposureDuration.seconds
+        let onApplied = exposureSeedCompletion
+        exposureSeedCompletion = nil
 
         // Hop to main to round: `isoDetents` is written on the main thread
         // (see configureSession) and must not be read from this queue.
         // `setCustomExposure` dispatches back to sessionQueue itself.
         DispatchQueue.main.async {
-            self.setCustomExposure(
-                iso: self.roundToNearestISO(meteredISO),
-                shutterSeconds: meteredShutter
-            )
+            let adoptedISO = self.roundToNearestISO(meteredISO)
+            self.setCustomExposure(iso: adoptedISO, shutterSeconds: meteredShutter)
+
+            // Report the values directly rather than letting the caller read
+            // `currentISO`: `setCustomExposure` has not written them back yet.
+            onApplied?(adoptedISO, meteredShutter)
         }
     }
 

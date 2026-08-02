@@ -157,7 +157,7 @@ class AutoExposureCoordinator: NSObject {
         // When off, the app skips inference but still takes over the metered
         // exposure; manual long-press inference (triggerManualInference) is unaffected.
         guard UserDefaults.standard.bool(forKey: "autoExposureOnLaunch") else {
-            cameraService.holdCurrentExposure()
+            holdMeteredExposure()
             Logger.ml.debug("Startup inference disabled - holding the metered exposure")
             return
         }
@@ -166,7 +166,7 @@ class AutoExposureCoordinator: NSObject {
             guard let self else { return }
             guard let frame = await self.cameraService.captureNextFrame() else {
                 await MainActor.run {
-                    self.cameraService.holdCurrentExposure()
+                    self.holdMeteredExposure()
                     Logger.ml.debug("No preview frame available - holding the metered exposure")
                 }
                 return
@@ -177,9 +177,39 @@ class AutoExposureCoordinator: NSObject {
                 }
             } else {
                 await MainActor.run {
-                    self.cameraService.holdCurrentExposure()
+                    self.holdMeteredExposure()
                     Logger.ml.debug("No trained model yet - holding the metered exposure")
                 }
+            }
+        }
+    }
+
+    /// Seed the starting exposure and move the rings to match it.
+    ///
+    /// The rings do not track the camera on their own — `applyAIPrediction` is
+    /// the only other thing that positions them. Without this the camera would
+    /// hold the metered exposure while the rings sat at their default, and the
+    /// first nudge would snap the exposure down to that default.
+    ///
+    /// Deliberately unlike `applyAIPrediction`: no exposure ramp, because the
+    /// value is already applied, and no `isAIAnimating` glow, because a metered
+    /// starting exposure is not a prediction and should not claim to be one.
+    private func holdMeteredExposure() {
+        cameraService.holdCurrentExposure { [weak self] iso, shutter in
+            guard let self else { return }
+            let isoAngle = ExposureCalculator.angleFromISO(
+                iso,
+                min: self.cameraService.minISO,
+                max: self.cameraService.maxISO
+            )
+            let shutterAngle = ExposureCalculator.angleFromShutter(
+                shutter,
+                min: self.cameraService.minShutterSpeed,
+                max: self.cameraService.maxShutterSpeed
+            )
+            withAnimation(.spring(duration: 0.4)) {
+                self.exposureControlVM.updateRotationAngle(control: .iso, angle: isoAngle)
+                self.exposureControlVM.updateRotationAngle(control: .shutter, angle: shutterAngle)
             }
         }
     }
