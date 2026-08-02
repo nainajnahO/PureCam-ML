@@ -53,6 +53,9 @@ class CameraService: NSObject {
     // a seed superseded by a newer one never reports.
     private var exposureSeedCompletion: ((Float, Double) -> Void)?
 
+    // When the current metering pass started, for the settle time in the log.
+    private var exposureSeedStart: ContinuousClock.Instant?
+
     // Video output for live frame capture (for ML feature extraction)
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let videoOutputQueue = DispatchQueue(label: "com.purelenz.videoOutputQueue")
@@ -161,6 +164,12 @@ class CameraService: NSObject {
         }
     }
     
+    /// How long to wait for a one-shot metering pass before adopting whatever
+    /// the device has reached. A large change of scene between launches takes
+    /// appreciably longer to converge than a re-meter in steady light, so this
+    /// is sized for the former — the case the seed exists to handle.
+    private static let exposureSeedTimeoutSeconds = 3.0
+
     /// Meter the scene once, then take that exposure over and hold it.
     ///
     /// This is the app's starting exposure, and it replaces the old
@@ -220,6 +229,7 @@ class CameraService: NSObject {
             }
 
             self.isSeedingExposure = true
+            self.exposureSeedStart = .now
 
             // Wait on `exposureMode` reaching `.locked` rather than on
             // `isAdjustingExposure`: the mode is a one-way transition, so there
@@ -241,7 +251,7 @@ class CameraService: NSObject {
                 self.adoptMeteredExposure(from: device)
             }
             self.exposureSeedTimeout = timeout
-            self.sessionQueue.asyncAfter(deadline: .now() + 1.0, execute: timeout)
+            self.sessionQueue.asyncAfter(deadline: .now() + Self.exposureSeedTimeoutSeconds, execute: timeout)
 
             // It may already have settled in the gap before the observation
             // was installed.
@@ -274,6 +284,8 @@ class CameraService: NSObject {
         let meteredShutter = device.exposureDuration.seconds
         let onApplied = exposureSeedCompletion
         exposureSeedCompletion = nil
+        let settle = exposureSeedStart?.duration(to: .now)
+        exposureSeedStart = nil
 
         // Hop to main to round: `isoDetents` is written on the main thread
         // (see configureSession) and must not be read from this queue.
@@ -281,8 +293,11 @@ class CameraService: NSObject {
         DispatchQueue.main.async {
             let adoptedISO = self.roundToNearestISO(meteredISO)
             self.setCustomExposure(iso: adoptedISO, shutterSeconds: meteredShutter)
+            let settled = settle?.formatted(
+                .units(allowed: [.milliseconds], width: .abbreviated, fractionalPart: .show(length: 1))
+            ) ?? "n/a"
             Logger.camera.info(
-                "Seeded exposure: ISO \(Int(adoptedISO)), shutter 1/\(Int(1 / meteredShutter))"
+                "Seeded exposure: ISO \(Int(adoptedISO)), shutter 1/\(Int(1 / meteredShutter)) (metered in \(settled))"
             )
 
             // Report the values directly rather than letting the caller read
