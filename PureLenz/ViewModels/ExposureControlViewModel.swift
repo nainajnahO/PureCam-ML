@@ -29,11 +29,20 @@ class ExposureControlViewModel {
 
     // MARK: - State
 
-    /// Current rotation angle for ISO control (inner dot)
-    private(set) var isoRotationAngle: Angle = .zero
+    /// Accumulated position of each knob along its arc, 0...1.
+    ///
+    /// This is the source of truth for both the value and the dot position. It
+    /// is carried across frames and clamped rather than being recomputed from
+    /// the thumb's bearing, which is what gives the arc ends instead of a seam.
+    private(set) var isoProgress: Double = 0
+    private(set) var shutterProgress: Double = 0
 
-    /// Current rotation angle for shutter control (outer dot)
-    private(set) var shutterRotationAngle: Angle = .zero
+    /// Where the dots sit. Derived, never set: a stored angle would be a second
+    /// source of truth that could drift from the value it is supposed to depict,
+    /// and — because `Angle` interpolates linearly on `.degrees` — an accumulated
+    /// one could send the AI's spring animation the long way round the circle.
+    var isoRotationAngle: Angle { ExposureCalculator.angle(forProgress: isoProgress) }
+    var shutterRotationAngle: Angle { ExposureCalculator.angle(forProgress: shutterProgress) }
 
     /// Last discrete ISO value (for haptic change detection)
     private var lastDiscreteISO: Float = 0
@@ -41,10 +50,15 @@ class ExposureControlViewModel {
     /// Active control (ISO or shutter)
     private(set) var activeControl: ExposureControl? = nil
 
-    /// Velocity tracking for shutter rumble intensity.
+    /// Thumb bearing at the previous frame. `nil` means no drag is in progress —
+    /// and is what makes touch-down inert: the first frame only records where the
+    /// thumb landed, so the knob turns by how far you move it rather than jumping
+    /// to wherever you happened to touch.
+    private var lastBearing: Double?
+
+    /// Time of the previous shutter drag frame, for rumble intensity.
     /// `nil` means no shutter drag is in progress.
     private var lastDragTime: ContinuousClock.Instant?
-    private var lastDragAngle: Double = 0.0
 
     // MARK: - Initialization
 
@@ -60,15 +74,38 @@ class ExposureControlViewModel {
 
     // MARK: - Public Methods
 
-    /// Update ISO based on drag gesture progress
-    /// - Parameter progress: Progress value (0-1) representing rotation around the circle
-    func updateISO(progress: Double) {
+    /// Begin a drag on a knob without moving it.
+    ///
+    /// Recording the bearing and nothing else is the whole point: the knob turns
+    /// by how far the thumb travels, so grabbing it anywhere — including the far
+    /// side of the button — leaves the exposure exactly where it was.
+    /// - Parameter bearing: Thumb bearing in degrees, 0° = top, clockwise.
+    func beginDrag(control: ExposureControl, bearing: Double) {
+        activeControl = control
+        lastBearing = bearing
+
+        // The rumble belongs to the whole gesture, so it starts here rather than
+        // on the first frame that moves. Nothing else about the knob changes yet.
+        if control == .shutter {
+            hapticManager.startShutterRumble()
+            lastDragTime = .now
+        }
+    }
+
+    /// Advance ISO by the thumb movement since the last frame.
+    /// - Parameter bearing: Thumb bearing in degrees, 0° = top, clockwise.
+    func updateISO(bearing: Double) {
+        guard let delta = consumeBearingDelta(bearing) else { return }
+
         // A manual adjustment takes over from the AI prediction for the session.
         autoExposureManager.notifyManualOverride()
 
-        // Map progress to ISO logarithmically using ExposureCalculator
+        let step = ExposureCalculator.accumulate(progress: isoProgress, bearingDelta: delta)
+        isoProgress = step.progress
+        reportWall(hit: step.hitWall)
+
         let continuousISO = ExposureCalculator.isoFromProgress(
-            progress,
+            isoProgress,
             min: cameraService.minISO,
             max: cameraService.maxISO
         )
@@ -79,7 +116,7 @@ class ExposureControlViewModel {
         // Trigger haptic when discrete ISO value changes
         if newISO != lastDiscreteISO {
             lastDiscreteISO = newISO
-            hapticManager.playISOClick()
+            hapticManager.playDetentClick()
         }
 
         // Apply new ISO (shutter stays fixed)
@@ -89,45 +126,51 @@ class ExposureControlViewModel {
         )
     }
 
-    /// Update shutter speed based on drag gesture progress
-    /// - Parameters:
-    ///   - progress: Progress value (0-1) representing rotation around the circle
-    ///   - normalizedAngle: Angle in degrees (0-360) for velocity tracking
-    func updateShutter(progress: Double, normalizedAngle: Double) {
+    /// Advance shutter speed by the thumb movement since the last frame.
+    /// - Parameter bearing: Thumb bearing in degrees, 0° = top, clockwise.
+    func updateShutter(bearing: Double) {
+        guard let delta = consumeBearingDelta(bearing) else { return }
+
         // A manual adjustment takes over from the AI prediction for the session.
         autoExposureManager.notifyManualOverride()
 
+        let previousProgress = shutterProgress
+        let step = ExposureCalculator.accumulate(progress: shutterProgress, bearingDelta: delta)
+        shutterProgress = step.progress
+        reportWall(hit: step.hitWall)
+
+        // Rumble tracks how fast the *value* is moving, not how fast the thumb
+        // is. Driving it from the raw thumb delta kept it buzzing at full
+        // intensity against a knob that had stopped, because the thumb was still
+        // travelling. Applied travel shrinks to nothing as the knob reaches an
+        // end, so it now eases off into the wall instead.
+        let appliedDegrees = (shutterProgress - previousProgress)
+            * ExposureControlConstants.sweepDegrees
+
+        // Easing off is not enough on its own: `updateShutterRumble` floors
+        // intensity at 0.2, so a stopped knob would still hum. Pinned against an
+        // end, stop outright — the shutter counterpart of the ISO click falling
+        // silent once the detent stops changing. Both calls are idempotent, so
+        // driving them every frame is safe.
+        let isPinned = shutterProgress == previousProgress
+            && (shutterProgress == 0 || shutterProgress == 1)
+
         let now = ContinuousClock.now
-        if let previousDragTime = lastDragTime {
-            // Calculate velocity for rumble intensity
+        if isPinned {
+            hapticManager.stopShutterRumble()
+        } else if let previousDragTime = lastDragTime {
+            hapticManager.startShutterRumble()
+
             let timeDelta = previousDragTime.duration(to: now) / .seconds(1)
-
-            // Handle angle wraparound (360° → 0° or 0° → 360°)
-            var angleDelta = normalizedAngle - lastDragAngle
-            if angleDelta > 180 {
-                angleDelta -= 360
-            } else if angleDelta < -180 {
-                angleDelta += 360
-            }
-
-            // Calculate velocity and normalize to 0-1 range
-            let velocity = timeDelta > 0 ? abs(angleDelta / timeDelta) : 0
+            let velocity = timeDelta > 0 ? abs(appliedDegrees / timeDelta) : 0
             let normalizedVelocity = min(velocity / ExposureControlConstants.maxRumbleVelocity, 1.0)
 
-            // Update rumble intensity based on velocity
             hapticManager.updateShutterRumble(velocity: normalizedVelocity)
-        } else {
-            // Start rumble on first drag
-            hapticManager.startShutterRumble()
         }
-
-        // Update tracking variables (identical in both branches)
         lastDragTime = now
-        lastDragAngle = normalizedAngle
 
-        // Map progress to shutter speed logarithmically using ExposureCalculator
         let newShutter = ExposureCalculator.shutterFromProgress(
-            progress,
+            shutterProgress,
             min: cameraService.minShutterSpeed,
             max: cameraService.maxShutterSpeed
         )
@@ -139,23 +182,144 @@ class ExposureControlViewModel {
         )
     }
 
-    /// Set rotation angle for a specific control
-    /// - Parameters:
-    ///   - control: Which control (ISO or shutter)
-    ///   - angle: Rotation angle to set
-    func updateRotationAngle(control: ExposureControl, angle: Angle) {
-        switch control {
-        case .iso:
-            isoRotationAngle = angle
-        case .shutter:
-            shutterRotationAngle = angle
+    // MARK: - Stepped Adjustment
+
+    /// Current ISO, rounded to the detent it sits on.
+    ///
+    /// Derived from `isoProgress` rather than read back from the camera.
+    /// `setCustomExposure` hops main → sessionQueue → main, so the camera's copy
+    /// lags a round trip, and two VoiceOver steps arriving inside that window
+    /// would both compute from the same base — the second then landing on the
+    /// same detent and being dropped by the no-op guard in `stepISO`.
+    ///
+    /// Progress is already the source of truth for the dot, so deriving from it
+    /// also stops the spoken value and the dot position disagreeing.
+    ///
+    /// The range is `0...0` until `configureSession` runs, and `log(0)` would
+    /// make the mapping non-finite. Falling back to the camera's own value there
+    /// keeps this finite for `Int(...)` in the spoken readout — the conversion
+    /// that used to trap on the shutter side for the same reason.
+    var currentISO: Float {
+        guard cameraService.minISO > 0, cameraService.maxISO > 0 else {
+            return cameraService.roundToNearestISO(cameraService.currentISO)
         }
+        return cameraService.roundToNearestISO(
+            ExposureCalculator.isoFromProgress(
+                isoProgress,
+                min: cameraService.minISO,
+                max: cameraService.maxISO
+            )
+        )
     }
 
-    /// Set which control is currently active
-    /// - Parameter control: The active control (ISO or shutter)
-    func setActiveControl(_ control: ExposureControl) {
-        activeControl = control
+    /// Current shutter speed in seconds. Derived from `shutterProgress`, with
+    /// the same pre-configure fallback, for the same reasons as `currentISO`.
+    var currentShutterSeconds: Double {
+        guard cameraService.minShutterSpeed > 0, cameraService.maxShutterSpeed > 0 else {
+            return cameraService.currentShutterSpeed
+        }
+        return ExposureCalculator.shutterFromProgress(
+            shutterProgress,
+            min: cameraService.minShutterSpeed,
+            max: cameraService.maxShutterSpeed
+        )
+    }
+
+    /// Move ISO by whole detents.
+    ///
+    /// Steps the detent table rather than nudging progress by a fixed fraction,
+    /// so a step always lands exactly on a supported value — the same places the
+    /// drag gesture clicks through.
+    func stepISO(by steps: Int) {
+        // Before `configureSession` the range is still 0...0, which makes every
+        // derived value non-finite. VoiceOver can reach these dots in that
+        // window — the same window that used to make the shutter readout trap.
+        guard cameraService.minISO > 0, cameraService.maxISO > 0 else { return }
+
+        let detents = cameraService.isoDetents
+        let base = currentISO
+        guard let index = detents.firstIndex(of: base) else { return }
+
+        let requested = index + steps
+        let landed = Swift.max(0, Swift.min(detents.count - 1, requested))
+        let target = detents[landed]
+
+        // Report the wall before the no-op guard below, not after: a step that
+        // runs off the end lands back on the value it started from, so the guard
+        // would swallow the bump along with the move.
+        //
+        // Unlike the drag path this bumps on every step past the end rather than
+        // only on arrival. Each one is a separate deliberate press, and silence
+        // would be indistinguishable from the step being lost.
+        if landed != requested {
+            reportWall(hit: true)
+        }
+
+        guard target != base else { return }
+
+        autoExposureManager.notifyManualOverride()
+        isoProgress = ExposureCalculator.progressFromISO(
+            target, min: cameraService.minISO, max: cameraService.maxISO
+        )
+
+        // Same detent-changed event the drag path clicks on. Keeping
+        // `lastDiscreteISO` in step matters beyond the click itself: left stale,
+        // the next drag would compare against a value stepping had already moved
+        // past and fire a click on its first frame for a change it didn't make.
+        lastDiscreteISO = target
+        hapticManager.playDetentClick()
+
+        // Cross-write from this view model's own value, not the camera's: after
+        // a shutter step the camera is still a round trip behind, and passing
+        // its copy back would undo that step.
+        cameraService.setCustomExposure(
+            iso: target,
+            shutterSeconds: currentShutterSeconds
+        )
+    }
+
+    /// Move shutter speed by thirds of a stop, matching the ISO detent spacing.
+    func stepShutter(by steps: Int) {
+        let low = cameraService.minShutterSpeed
+        let high = cameraService.maxShutterSpeed
+        // See `stepISO` — nothing to step along until the range exists.
+        guard low > 0, high > 0 else { return }
+
+        let base = currentShutterSeconds
+        let scaled = base * pow(2.0, Double(steps) / 3.0)
+        let target = Swift.max(low, Swift.min(high, scaled))
+
+        // See `stepISO` — the clamp is what says an end was reached, and it has
+        // to be read before the no-op guard swallows it.
+        if target != scaled {
+            reportWall(hit: true)
+        }
+
+        guard target != base else { return }
+
+        autoExposureManager.notifyManualOverride()
+        shutterProgress = ExposureCalculator.progressFromShutter(target, min: low, max: high)
+
+        // The drag path has no shutter click — it runs a continuous rumble that
+        // a discrete step is too brief to convey — so stepping borrows the
+        // detent click instead of leaving the step silent.
+        hapticManager.playDetentClick()
+
+        // Cross-write from this view model's value — see `stepISO`.
+        cameraService.setCustomExposure(iso: currentISO, shutterSeconds: target)
+    }
+
+    /// Place a knob at an absolute position, for the AI to drive it.
+    /// - Parameters:
+    ///   - control: Which control (ISO or shutter)
+    ///   - progress: Position along the arc, 0...1
+    func setProgress(control: ExposureControl, progress: Double) {
+        switch control {
+        case .iso:
+            isoProgress = progress
+        case .shutter:
+            shutterProgress = progress
+        }
     }
 
     /// Reset active control after drag ends
@@ -164,9 +328,29 @@ class ExposureControlViewModel {
         if activeControl == .shutter {
             hapticManager.stopShutterRumble()
             lastDragTime = nil
-            lastDragAngle = 0.0
         }
 
+        lastBearing = nil
         activeControl = nil
+    }
+
+    // MARK: - Private Methods
+
+    /// Degrees turned since the previous frame, advancing the stored bearing.
+    /// - Returns: The shortest-arc delta, or `nil` on the first frame of a drag,
+    ///   when there is no previous bearing to measure against and the knob must
+    ///   therefore stay put.
+    private func consumeBearingDelta(_ bearing: Double) -> Double? {
+        defer { lastBearing = bearing }
+
+        guard let previous = lastBearing else { return nil }
+        return ExposureCalculator.shortestArcDelta(from: previous, to: bearing)
+    }
+
+    /// Bump once on reaching an end. `hitWall` is already true only on the frame
+    /// that arrives, so pushing on against the wall stays silent.
+    private func reportWall(hit: Bool) {
+        guard hit else { return }
+        hapticManager.impact(.medium)
     }
 }

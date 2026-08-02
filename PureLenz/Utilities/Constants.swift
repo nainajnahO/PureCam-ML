@@ -166,4 +166,13 @@ enum ExposureControlConstants {
     /// Angular drag velocity (deg/sec) that maps to full-intensity rumble.
     /// Anything faster is clamped to 1.0.
     static let maxRumbleVelocity: Double = 500.0
+
+    /// Arc the knob sweeps from minimum to maximum.
+    ///
+    /// Deliberately less than a full turn. A circle has no ends but the exposure
+    /// range does, so mapping the range onto 360° put minimum and maximum at the
+    /// same bearing — one ISO detent apart — and a nudge past the top silently
+    /// flipped ISO 6400 to 32. The remaining 60° is the wall at 12 o'clock that
+    /// keeps the two ends from being the same place.
+    static let sweepDegrees: Double = 300.0
 }

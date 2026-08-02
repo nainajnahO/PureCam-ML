@@ -47,8 +47,9 @@ struct ExposureCalculatorTests {
         let iso = ExposureCalculator.isoFromProgress(originalProgress, min: minISO, max: maxISO)
         let angle = ExposureCalculator.angleFromISO(iso, min: minISO, max: maxISO)
 
-        // angleFromISO maps progress 0...1 to 0°...360°.
-        let expectedDegrees = originalProgress * 360.0
+        // angleFromISO maps progress 0...1 across the knob's arc, which is
+        // deliberately less than a full turn — see sweepDegrees.
+        let expectedDegrees = originalProgress * ExposureControlConstants.sweepDegrees
         #expect(abs(angle.degrees - expectedDegrees) < 0.1)
     }
 
@@ -66,7 +67,7 @@ struct ExposureCalculatorTests {
         #expect(abs(slowest - max) < 1e-9)
     }
 
-    @Test("angleFromShutter clamps to 0...360 for out-of-range shutter values")
+    @Test("angleFromShutter clamps to the knob's arc for out-of-range shutter values")
     func angleFromShutterClampsToValidRange() {
         let min = CameraConstants.fastestManualShutter
         let max = CameraConstants.slowestManualShutter
@@ -75,9 +76,165 @@ struct ExposureCalculatorTests {
         let tooFast = ExposureCalculator.angleFromShutter(1.0 / 8000.0, min: min, max: max)
         #expect(tooFast.degrees == 0)
 
-        // Slower than the maximum → clamp to 360°
+        // Slower than the maximum → clamp to the far end of the arc
         let tooSlow = ExposureCalculator.angleFromShutter(2.0, min: min, max: max)
-        #expect(tooSlow.degrees == 360)
+        #expect(tooSlow.degrees == ExposureControlConstants.sweepDegrees)
+    }
+
+    /// The whole point of the wall: the two ends must not be the same bearing.
+    /// If the sweep ever went back to a full turn, minimum and maximum would
+    /// coincide at 12 o'clock again and a nudge past one would land on the other.
+    @Test("the arc stops short of a full turn, so the ends are different places")
+    func sweepLeavesAGap() {
+        #expect(ExposureControlConstants.sweepDegrees < 360)
+        #expect(ExposureControlConstants.sweepDegrees > 180)
+
+        let start = ExposureCalculator.angle(forProgress: 0).degrees
+        let end = ExposureCalculator.angle(forProgress: 1).degrees
+        #expect(360 - (end - start) >= 30)
+    }
+}
+
+@Suite("Shutter readout")
+struct ShutterReadoutTests {
+    /// The regression this exists for: `CameraService.currentShutterSpeed` is 0
+    /// until the session configures, and that configuration is suspended while
+    /// the camera-permission dialog is up. So a first-ever launch really does
+    /// read 0 here — and `Int(1.0 / 0)` is a trap, not a wrong number. The app
+    /// crashed before the user could grant permission, which is invisible on any
+    /// device that has already granted it.
+    @Test("an unconfigured shutter speed yields no reading instead of trapping")
+    func unconfiguredShutterHasNoReading() {
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: 0) == nil)
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: -1) == nil)
+    }
+
+    /// A denormal would divide to something finite but far past `Int.max`, which
+    /// traps for the same reason infinity does.
+    @Test("an implausibly fast shutter yields no reading rather than overflowing")
+    func implausiblyFastShutterHasNoReading() {
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: 1e-300) == nil)
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: .leastNonzeroMagnitude) == nil)
+    }
+
+    @Test("a real shutter speed reads as its spoken denominator")
+    func realShutterReadsAsDenominator() {
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: 1.0 / 250.0) == 250)
+        #expect(ExposureCalculator.shutterDenominator(forSeconds: 0.5) == 2)
+        #expect(
+            ExposureCalculator.shutterDenominator(
+                forSeconds: CameraConstants.fastestManualShutter
+            ) == 4000
+        )
+    }
+}
+
+@Suite("Knob accumulation")
+struct KnobAccumulationTests {
+    /// Turning the knob past an end must hold there. Before accumulation, the
+    /// value came straight from the thumb's bearing, so crossing 12 o'clock
+    /// flipped ISO from its maximum to its minimum in a single frame.
+    @Test("pushing past the top holds at the maximum instead of wrapping")
+    func pushingPastTopHolds() {
+        let nearTop = ExposureCalculator.accumulate(progress: 0.95, bearingDelta: 60)
+        #expect(nearTop.progress == 1.0)
+        #expect(nearTop.hitWall)
+
+        // Keep pushing: still pinned, and no second bump.
+        let pushOn = ExposureCalculator.accumulate(progress: 1.0, bearingDelta: 60)
+        #expect(pushOn.progress == 1.0)
+        #expect(!pushOn.hitWall)
+    }
+
+    @Test("pushing past the bottom holds at the minimum instead of wrapping")
+    func pushingPastBottomHolds() {
+        let nearBottom = ExposureCalculator.accumulate(progress: 0.05, bearingDelta: -60)
+        #expect(nearBottom.progress == 0.0)
+        #expect(nearBottom.hitWall)
+
+        let pushOn = ExposureCalculator.accumulate(progress: 0.0, bearingDelta: -60)
+        #expect(pushOn.progress == 0.0)
+        #expect(!pushOn.hitWall)
+    }
+
+    /// What the shutter rumble reads. Its intensity comes from how far the value
+    /// actually travelled, so this being exactly zero against an end is what lets
+    /// it fall silent there. Deriving it from thumb movement instead left it
+    /// buzzing at full strength against a knob that had already stopped.
+    @Test("no travel is applied while held against an end")
+    func pinnedAgainstEndAppliesNoTravel() {
+        let atTop = ExposureCalculator.accumulate(progress: 1.0, bearingDelta: 45)
+        #expect(atTop.progress - 1.0 == 0)
+
+        let atBottom = ExposureCalculator.accumulate(progress: 0.0, bearingDelta: -45)
+        #expect(atBottom.progress - 0.0 == 0)
+    }
+
+    /// Reversing has to release immediately. If arriving at the wall stored any
+    /// overshoot, the user would have to wind that back before the value moved,
+    /// which reads as the knob being stuck.
+    @Test("reversing off the wall moves on the very next frame")
+    func reversingLeavesTheWallAtOnce() {
+        let pinned = ExposureCalculator.accumulate(progress: 1.0, bearingDelta: 60).progress
+        #expect(pinned == 1.0)
+
+        let backOff = ExposureCalculator.accumulate(progress: pinned, bearingDelta: -30)
+        #expect(backOff.progress < 1.0)
+        #expect(!backOff.hitWall)
+    }
+
+    /// A continuous sweep all the way round must not cycle. This is the exact
+    /// gesture that used to flip the extremes.
+    @Test("a full turn cannot carry the value past an end and back round")
+    func fullTurnCannotWrap() {
+        var progress = 0.5
+        // 24 frames of +30° is 720° — two full turns in one drag.
+        for _ in 0..<24 {
+            progress = ExposureCalculator.accumulate(progress: progress, bearingDelta: 30).progress
+        }
+        #expect(progress == 1.0)
+    }
+
+    /// Bearings are compass readings, so a thumb crossing 12 o'clock reports
+    /// 359° → 1°. Read naively that is a 358° leap backwards, which would slam
+    /// the knob to the opposite end.
+    @Test("crossing twelve o'clock reads as a small step, not a leap backwards")
+    func shortestArcHandlesTheSeam() {
+        #expect(ExposureCalculator.shortestArcDelta(from: 359, to: 1) == 2)
+        #expect(ExposureCalculator.shortestArcDelta(from: 1, to: 359) == -2)
+        #expect(ExposureCalculator.shortestArcDelta(from: 10, to: 40) == 30)
+        #expect(abs(ExposureCalculator.shortestArcDelta(from: 40, to: 10)) == 30)
+    }
+
+    /// The sweep is what converts thumb travel into value, so a turn equal to
+    /// the whole arc must cover exactly the whole range — no more, no less.
+    @Test("turning through the full arc covers exactly the whole range")
+    func fullArcCoversFullRange() {
+        let full = ExposureCalculator.accumulate(
+            progress: 0, bearingDelta: ExposureControlConstants.sweepDegrees
+        )
+        #expect(abs(full.progress - 1.0) < 1e-12)
+
+        let half = ExposureCalculator.accumulate(
+            progress: 0, bearingDelta: ExposureControlConstants.sweepDegrees / 2
+        )
+        #expect(abs(half.progress - 0.5) < 1e-12)
+    }
+
+    /// Progress is the source of truth for the value too, so the forward mapping
+    /// must refuse to extrapolate past the ends even if handed an out-of-range
+    /// progress — otherwise a wall in the gesture could still be walked around.
+    @Test("the value mapping clamps rather than extrapolating past the ends")
+    func valueMappingClamps() {
+        let beyondMax = ExposureCalculator.isoFromProgress(1.5, min: 32, max: 3200)
+        let atMax = ExposureCalculator.isoFromProgress(1.0, min: 32, max: 3200)
+        #expect(abs(beyondMax - atMax) < 0.01)
+
+        let belowMin = ExposureCalculator.shutterFromProgress(
+            -0.5, min: CameraConstants.fastestManualShutter,
+            max: CameraConstants.slowestManualShutter
+        )
+        #expect(abs(belowMin - CameraConstants.fastestManualShutter) < 1e-9)
     }
 }
 

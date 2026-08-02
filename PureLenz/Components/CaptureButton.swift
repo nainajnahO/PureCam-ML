@@ -30,6 +30,26 @@ struct CaptureButton: View {
 
     var onCapture: () -> Void
 
+    /// Spoken ISO. Plain number rather than the HUD's monospaced readout —
+    /// VoiceOver reads it aloud, so formatting for column alignment is noise.
+    private var isoValueText: String {
+        "\(Int(exposureVM.currentISO))"
+    }
+
+    /// Spoken shutter speed, as the fraction photographers actually say.
+    ///
+    /// Evaluated on every body pass, not only under VoiceOver, and the first of
+    /// those passes can precede the capture session being configured — see
+    /// `shutterDenominator(forSeconds:)` for why that used to be fatal.
+    private var shutterValueText: String {
+        guard let denominator = ExposureCalculator.shutterDenominator(
+            forSeconds: exposureVM.currentShutterSeconds
+        ) else {
+            return "Not available"
+        }
+        return "1 over \(denominator) second"
+    }
+
     var body: some View {
         let isAIAnimating = autoExposure.isAIAnimating
 
@@ -38,6 +58,19 @@ struct CaptureButton: View {
         // orbiting dots sit at a larger radius than the glass disc, so they
         // can't be glass "content" and must be their own overlay layer.
         ZStack {
+            // Shutter release, as its own element. VoiceOver exposes one value
+            // per element, so the two exposure controls below cannot share an
+            // element with each other or with this — hence three, not one.
+            Color.clear
+                .allowsHitTesting(false)
+                .accessibilityElement()
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("Capture photo")
+                .accessibilityAction {
+                    haptics.impact(.medium)
+                    onCapture()
+                }
+
             // Outer dot (shutter control) with HDR glow
             Circle()
                 .fill(.yellow)
@@ -49,6 +82,18 @@ struct CaptureButton: View {
                 .opacity(isAIAnimating ? 1.0 : 0.8)
                 .brightness(isAIAnimating ? 0.4 : 0)
                 .allowsHitTesting(false)
+                .accessibilityElement()
+                .accessibilityLabel("Shutter speed")
+                .accessibilityValue(shutterValueText)
+                .accessibilityAdjustableAction { direction in
+                    // Slower shutter is the brighter end, and matches the
+                    // clockwise direction of the drag, so increment slows.
+                    switch direction {
+                    case .increment: exposureVM.stepShutter(by: 1)
+                    case .decrement: exposureVM.stepShutter(by: -1)
+                    @unknown default: break
+                    }
+                }
 
             // Inner dot (ISO control) with HDR glow
             Circle()
@@ -61,6 +106,16 @@ struct CaptureButton: View {
                 .opacity(isAIAnimating ? 1.0 : 0.8)
                 .brightness(isAIAnimating ? 0.4 : 0)
                 .allowsHitTesting(false)
+                .accessibilityElement()
+                .accessibilityLabel("ISO")
+                .accessibilityValue(isoValueText)
+                .accessibilityAdjustableAction { direction in
+                    switch direction {
+                    case .increment: exposureVM.stepISO(by: 1)
+                    case .decrement: exposureVM.stepISO(by: -1)
+                    @unknown default: break
+                    }
+                }
         }
         .frame(width: buttonSize, height: buttonSize)
         .contentShape(Circle())
@@ -77,7 +132,9 @@ struct CaptureButton: View {
                     handleDragEnd()
                 }
         )
-        .accessibilityLabel("Capture Photo - Drag inner dot to adjust ISO, outer dot to adjust shutter speed")
+        // A container, not an element: the shutter release and the two exposure
+        // controls inside each need their own focus and their own value.
+        .accessibilityElement(children: .contain)
     }
 
     private func handleDragChange(_ value: DragGesture.Value) {
@@ -92,28 +149,25 @@ struct CaptureButton: View {
         // Detect zone
         let control: ExposureControl = distance < isoZoneRadius ? .iso : .shutter
 
-        if exposureVM.activeControl == nil {
-            exposureVM.setActiveControl(control)
-        }
+        // Thumb bearing: 0° = 12 o'clock, increasing clockwise. Only its change
+        // between frames matters now — the knob turns by how far the thumb
+        // travels, so where it first landed carries no meaning.
+        let angleDegrees = atan2(dy, dx) * 180 / .pi
+        let bearing = (angleDegrees + 90 + 360).truncatingRemainder(dividingBy: 360)
 
-        // Calculate rotation angle
-        let angleRadians = atan2(dy, dx)
-        let angleDegrees = angleRadians * 180 / .pi
-        let rotationAngle = Angle.degrees(angleDegrees + 90)
-        let normalizedAngle = (angleDegrees + 90 + 360).truncatingRemainder(dividingBy: 360)
-        let progress = normalizedAngle / 360.0
-
-        // Update rotation angle in ViewModel
-        if let activeControl = exposureVM.activeControl {
-            exposureVM.updateRotationAngle(control: activeControl, angle: rotationAngle)
+        guard exposureVM.activeControl != nil else {
+            // First frame: latch the ring under the thumb and take a reference
+            // bearing, without moving anything.
+            exposureVM.beginDrag(control: control, bearing: bearing)
+            return
         }
 
         switch exposureVM.activeControl {
         case .iso:
-            exposureVM.updateISO(progress: progress)
+            exposureVM.updateISO(bearing: bearing)
 
         case .shutter:
-            exposureVM.updateShutter(progress: progress, normalizedAngle: normalizedAngle)
+            exposureVM.updateShutter(bearing: bearing)
 
         case .none:
             break
