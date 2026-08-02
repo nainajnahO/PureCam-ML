@@ -143,19 +143,32 @@ class AutoExposureCoordinator: NSObject {
 
     // MARK: - Private Methods
 
-    /// Trigger startup inference if ready
+    /// Trigger startup inference if ready.
+    ///
+    /// Every path out of this method leaves the camera holding an exposure the
+    /// app set — from the model when there is one, from the scene reading iOS
+    /// metered during the warmup delay above when there is not. The app never
+    /// rests in `continuousAutoExposure`, so `CameraService.currentISO` /
+    /// `currentShutterSpeed` always describe the exposure actually in force.
     private func triggerStartupInferenceIfReady() {
-        // Respect the user's "Auto-adjust exposure on launch" setting (Settings app).
-        // When off, we leave the camera in iOS auto-exposure; manual long-press inference
-        // (triggerManualInference) is unaffected.
-        guard UserDefaults.standard.bool(forKey: "autoExposureOnLaunch") else { return }
-
         guard cameraService.status == .configured else { return }
+
+        // Respect the user's "Auto-adjust exposure on launch" setting (Settings app).
+        // When off, the app skips inference but still takes over the metered
+        // exposure; manual long-press inference (triggerManualInference) is unaffected.
+        guard UserDefaults.standard.bool(forKey: "autoExposureOnLaunch") else {
+            holdMeteredExposure()
+            Logger.ml.info("Startup inference disabled - holding the metered exposure")
+            return
+        }
 
         Task { [weak self] in
             guard let self else { return }
             guard let frame = await self.cameraService.captureNextFrame() else {
-                Logger.ml.debug("No preview frame available - staying in iOS auto mode")
+                await MainActor.run {
+                    self.holdMeteredExposure()
+                    Logger.ml.info("No preview frame available - holding the metered exposure")
+                }
                 return
             }
             if let prediction = self.autoExposureManager.runStartupInference(from: frame) {
@@ -164,9 +177,39 @@ class AutoExposureCoordinator: NSObject {
                 }
             } else {
                 await MainActor.run {
-                    self.cameraService.resetAutoExposure()
-                    Logger.ml.debug("Using iOS auto-exposure (ML not available)")
+                    self.holdMeteredExposure()
+                    Logger.ml.info("No trained model yet - holding the metered exposure")
                 }
+            }
+        }
+    }
+
+    /// Seed the starting exposure and move the rings to match it.
+    ///
+    /// The rings do not track the camera on their own — `applyAIPrediction` is
+    /// the only other thing that positions them. Without this the camera would
+    /// hold the metered exposure while the rings sat at their default, and the
+    /// first nudge would snap the exposure down to that default.
+    ///
+    /// Deliberately unlike `applyAIPrediction`: no exposure ramp, because the
+    /// value is already applied, and no `isAIAnimating` glow, because a metered
+    /// starting exposure is not a prediction and should not claim to be one.
+    private func holdMeteredExposure() {
+        cameraService.holdCurrentExposure { [weak self] iso, shutter in
+            guard let self else { return }
+            let isoAngle = ExposureCalculator.angleFromISO(
+                iso,
+                min: self.cameraService.minISO,
+                max: self.cameraService.maxISO
+            )
+            let shutterAngle = ExposureCalculator.angleFromShutter(
+                shutter,
+                min: self.cameraService.minShutterSpeed,
+                max: self.cameraService.maxShutterSpeed
+            )
+            withAnimation(.spring(duration: 0.4)) {
+                self.exposureControlVM.updateRotationAngle(control: .iso, angle: isoAngle)
+                self.exposureControlVM.updateRotationAngle(control: .shutter, angle: shutterAngle)
             }
         }
     }

@@ -28,7 +28,7 @@
 			<key>Title</key>
 			<string>AI Auto-Exposure</string>
 			<key>FooterText</key>
-			<string>Automatically runs the on-device AI to set ISO and shutter speed each time the app opens. You can still trigger it manually with a long press on the preview button.</string>
+			<string>Runs the on-device AI to set ISO and shutter speed each time the app opens. When off, PureLenz meters the scene once at launch and holds that exposure until you change it — the camera is never left on iOS auto-exposure. You can still run the AI manually with a long press on the preview button.</string>
 		</dict>
 		<dict>
 			<key>Type</key>
