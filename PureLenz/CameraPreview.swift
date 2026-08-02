@@ -18,7 +18,7 @@ import SwiftUI
 import AVFoundation
 
 struct CameraPreview: UIViewRepresentable {
-    class VideoPreviewView: UIView {
+    class VideoPreviewView: UIView, UIGestureRecognizerDelegate {
         override class var layerClass: AnyClass {
             AVCaptureVideoPreviewLayer.self
         }
@@ -33,6 +33,23 @@ struct CameraPreview: UIViewRepresentable {
         /// without the app ever measuring the screen itself.
         var onCropFraction: ((CGFloat) -> Void)?
         private var reportedCropFraction: CGFloat?
+
+        /// Reports a viewfinder tap as both the point in this view's own
+        /// coordinates (where the reticle is drawn) and the normalized sensor
+        /// point it maps to (what focus needs).
+        ///
+        /// The conversion has to happen here, because only the layer knows the
+        /// two things that make a screen fraction *not* a sensor fraction:
+        /// `.resizeAspectFill` crops the short axis, and the connection is
+        /// rotated a fixed 90°, which swaps the axes. `captureDevicePointConverted`
+        /// accounts for both — dividing by the view's width and height does not.
+        var onFocusTap: ((_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)?
+
+        @objc func handleFocusTap(_ recognizer: UITapGestureRecognizer) {
+            let viewPoint = recognizer.location(in: self)
+            let devicePoint = videoPreviewLayer.captureDevicePointConverted(fromLayerPoint: viewPoint)
+            onFocusTap?(viewPoint, devicePoint)
+        }
 
         override func layoutSubviews() {
             super.layoutSubviews()
@@ -58,11 +75,23 @@ struct CameraPreview: UIViewRepresentable {
                 self?.onCropFraction?(fraction)
             }
         }
+
+        /// Only take taps that land on the viewfinder itself. The controls above
+        /// it (capture button, preview button, framing indicator) are separate
+        /// views, so a tap on one of those hit-tests to that view and must not
+        /// also focus the lens.
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch
+        ) -> Bool {
+            touch.view === self
+        }
     }
 
     let session: AVCaptureSession
     /// Surfaces the preview's true short-axis crop fraction (see `VideoPreviewView`).
     var onCropFraction: ((CGFloat) -> Void)?
+    /// Surfaces a viewfinder tap, already converted to a sensor point (see `VideoPreviewView`).
+    var onFocusTap: ((_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)?
 
     func makeUIView(context: Context) -> VideoPreviewView {
         let view = VideoPreviewView()
@@ -70,6 +99,15 @@ struct CameraPreview: UIViewRepresentable {
         view.videoPreviewLayer.session = session
         view.videoPreviewLayer.videoGravity = .resizeAspectFill
         view.onCropFraction = onCropFraction
+        view.onFocusTap = onFocusTap
+
+        // Targets the view rather than a Coordinator because the view is what
+        // holds the layer the conversion needs.
+        let tap = UITapGestureRecognizer(
+            target: view, action: #selector(VideoPreviewView.handleFocusTap(_:))
+        )
+        tap.delegate = view
+        view.addGestureRecognizer(tap)
 
         updateRotation(for: view.videoPreviewLayer)
 
@@ -78,6 +116,7 @@ struct CameraPreview: UIViewRepresentable {
 
     func updateUIView(_ uiView: VideoPreviewView, context: Context) {
         uiView.onCropFraction = onCropFraction
+        uiView.onFocusTap = onFocusTap
         updateRotation(for: uiView.videoPreviewLayer)
     }
 
