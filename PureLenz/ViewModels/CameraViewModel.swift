@@ -187,7 +187,7 @@ class CameraViewModel {
         focusReticleTask?.cancel()
         focusReticle = (point: viewPoint, token: UUID())
         focusReticleTask = Task { [weak self] in
-            try? await Task.sleep(for: FocusRipple.lifetime)
+            try? await Task.sleep(for: FocusReticle.lifetime)
             guard let self, !Task.isCancelled else { return }
             self.focusReticle = nil
         }
