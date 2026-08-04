@@ -43,6 +43,7 @@ struct ContentView: View {
                     scene.cameraVM.setPreviewCropFraction(fraction)
                 },
                 focusReticle: scene.cameraVM.focusReticle,
+                focusRippleFrame: scene.cameraVM.focusRippleFrame,
                 onFocusTap: { viewPoint, devicePoint in
                     scene.cameraVM.focusTapped(viewPoint: viewPoint, devicePoint: devicePoint)
                 }

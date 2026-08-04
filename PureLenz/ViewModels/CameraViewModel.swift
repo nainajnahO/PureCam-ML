@@ -61,9 +61,25 @@ class CameraViewModel {
     /// inheriting the previous one's half-faded state.
     private(set) var focusReticle: (point: CGPoint, token: UUID)?
 
-    /// Clears the reticle once it has finished fading; cancelled by a newer tap
-    /// so a stale timer cannot dismiss the current one.
+    /// The app-drawn copy of the viewfinder that the focus ripple warps. Non-nil
+    /// *only* while a ripple is running.
+    ///
+    /// SwiftUI cannot apply a shader to the live preview — it is a video pane the
+    /// system paints straight to the screen, whose pixels SwiftUI never has (see
+    /// `FocusRipple`). So for the length of the animation the app draws the
+    /// camera itself and distorts that instead.
+    private(set) var focusRippleFrame: UIImage?
+
+    /// Runs one ripple end to end: pulls the frames, holds the focus state, and
+    /// clears both. Cancelled by a newer tap so a stale run cannot dismiss the
+    /// current one.
     private var focusReticleTask: Task<Void, Never>?
+
+    /// Long-edge pixels for the frames the ripple warps. `nextFramingPreviewImage`
+    /// only ever downscales, so this is high enough to leave the video output's
+    /// native size alone — the copy standing in for the viewfinder should not be
+    /// visibly softer than the viewfinder. This is the effect's main cost dial.
+    private static let rippleFrameSize: CGFloat = 2400
 
     // MARK: - Initialization
 
@@ -90,6 +106,9 @@ class CameraViewModel {
             stopFramingPreviewLoop()
             focusReticleTask?.cancel()
             focusReticle = nil
+            // Cancelling mid-ripple leaves the copy on screen, which would freeze
+            // the viewfinder on a stale frame until the next tap.
+            focusRippleFrame = nil
             // Release the lens too, not just the marker for it. `.inactive`
             // covers brief interruptions — Control Center, a banner, the app
             // switcher — so leaving focus locked would mean returning to a lens
@@ -185,12 +204,52 @@ class CameraViewModel {
         hapticManager.impact(.light)
 
         focusReticleTask?.cancel()
-        focusReticle = (point: viewPoint, token: UUID())
         focusReticleTask = Task { [weak self] in
-            try? await Task.sleep(for: FocusReticle.lifetime)
-            guard let self, !Task.isCancelled else { return }
-            self.focusReticle = nil
+            await self?.runFocusRipple(at: viewPoint)
         }
+    }
+
+    /// Hold a warped copy of the viewfinder over the real one for the length of
+    /// the ripple, then hand the viewfinder back to the system.
+    ///
+    /// The frame pipeline is woken only for this window. `captureOutput` does no
+    /// per-frame work unless a request is pending (`CameraService.swift`), so
+    /// pulling frames here and stopping at the end leaves the camera exactly as
+    /// idle as it was before the tap — the effect costs nothing while nobody is
+    /// tapping.
+    ///
+    /// Frames are pulled live rather than one being frozen, so the lens is seen
+    /// racking focus during the ripple. Freezing would hide the very thing the
+    /// tap was asking for.
+    private func runFocusRipple(at viewPoint: CGPoint) async {
+        // The first frame doubles as the start signal: showing the copy and
+        // starting the animation on the same beat keeps them in step, and the
+        // wait is a single frame.
+        let first = await cameraService.nextFramingPreviewImage(maxDimension: Self.rippleFrameSize)
+        guard !Task.isCancelled else { return }
+
+        focusRippleFrame = first
+        focusReticle = (point: viewPoint, token: UUID())
+
+        if first != nil {
+            let clock = ContinuousClock()
+            let deadline = clock.now + FocusRipple.lifetime
+            while !Task.isCancelled, clock.now < deadline {
+                guard let frame = await cameraService.nextFramingPreviewImage(
+                    maxDimension: Self.rippleFrameSize
+                ) else { break }
+                guard !Task.isCancelled else { break }
+                focusRippleFrame = frame
+            }
+        } else {
+            // No frame arrived (session not running) — still mark the point, so
+            // a tap is never left unacknowledged just because the copy failed.
+            try? await Task.sleep(for: FocusRipple.lifetime)
+        }
+
+        guard !Task.isCancelled else { return }
+        focusRippleFrame = nil
+        focusReticle = nil
     }
 
     /// Toggle the framing-indicator HUD between the small outline schematic and
