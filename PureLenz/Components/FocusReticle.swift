@@ -16,91 +16,50 @@
 
 import SwiftUI
 
-/// The mark a focus tap leaves on the viewfinder: a droplet hitting still water.
+/// The point of contact: a neutral hairline that flashes where the tap landed
+/// and is gone in a third of a second.
 ///
-/// A circle of Liquid Glass lands at the tap point, spreads, thins out and
-/// flattens back into the scene. It is the same material as the capture and
-/// preview buttons (`ButtonUILayer`), so focus now speaks the app's own visual
-/// language instead of borrowing the stock camera app's yellow square. It also
-/// gives the yellow back to `FramingIndicator`, which can mean "framing" alone
-/// again.
+/// The ripple (`FocusRipple`) is the real answer to "where did I focus" — this
+/// only covers what refraction physically cannot. A distortion needs detail to
+/// bend, so over a flat bright sky or a dark low-contrast wall the ripple has
+/// nothing to work with and the tap would register as nothing at all. This is
+/// the floor under that case, kept deliberately brief and colourless so it reads
+/// as the droplet's contact rather than as a marker sitting on the scene.
 ///
-/// Glass is a *refractive* material, and the viewfinder is the one surface in
-/// this app with something real behind it to bend — so the ring warps the live
-/// scene rather than drawing a marker over it. That doubles as a picture of what
-/// the hardware is doing: a lens is curved glass, and it is refocusing.
+/// White rather than the old yellow, which now means "framing" alone again
+/// (`FramingIndicator`).
 ///
 /// The animation runs from `onAppear` and is not driven by any external state,
 /// so a fresh SwiftUI identity per tap (see `CameraViewModel.focusReticle`) is
 /// what restarts it.
 struct FocusReticle: View {
-    private static let impactDuration = 0.22
-    private static let holdDuration = 0.18
-    private static let settleDuration = 0.45
-    /// The leading edge outlives the impact only briefly — it is the flash of a
-    /// ring running out, not an outline sitting on the scene.
-    private static let rimFadeDuration = 0.25
+    private static let duration = 0.32
 
-    /// Time from contact to the ring being fully gone. `CameraViewModel` clears
-    /// its reticle state after exactly this, so the view is removed as it
-    /// becomes invisible rather than while still fading.
-    static let lifetime: Duration = .seconds(impactDuration + holdDuration + settleDuration)
-
-    /// The three diameters the ring passes through: where the droplet lands, the
-    /// ring at full strength, and where it has spread thin enough to vanish.
-    ///
     /// Deliberately not scaled by `UIConstants.globalScale`: that governs the
     /// size of the controls, while this marks a point in the scene.
-    private static let contactDiameter: CGFloat = 26
-    private static let ringDiameter: CGFloat = 92
-    private static let dissipatedDiameter: CGFloat = 132
+    private static let contactDiameter: CGFloat = 22
+    private static let spreadDiameter: CGFloat = 66
 
     @State private var diameter = FocusReticle.contactDiameter
-    @State private var opacity: Double = 1
-    @State private var rimOpacity: Double = 1
+    @State private var opacity: Double = 0.55
 
     var body: some View {
         Circle()
-            .fill(.clear)
-            // The *frame* animates, not `scaleEffect`: scaling would magnify an
-            // already-sampled backdrop, which reads as a zoom. Resizing the glass
-            // re-samples it at every size, so the refraction genuinely travels
-            // across the scene the way a ring on water does.
+            .stroke(.white, lineWidth: 1)
             .frame(width: diameter, height: diameter)
-            // `.clear` matches the buttons. No `.interactive()` — that responds
-            // to touch, and this view is explicitly not hit-testable.
-            .glassEffect(.clear, in: .circle)
-            .overlay {
-                // A neutral hairline on the ring's leading edge. The refraction
-                // is the signal, but it has nothing to bend over a flat bright
-                // sky or a dark low-contrast wall — this keeps the tap readable
-                // there without reintroducing a coloured marker.
-                Circle()
-                    .stroke(.white.opacity(0.45), lineWidth: 1)
-                    .opacity(rimOpacity)
-            }
             .opacity(opacity)
             // The reticle sits over the viewfinder, so it must never swallow the
             // next tap.
             .allowsHitTesting(false)
             // Purely decorative — the focus it marks is not an element to
             // navigate to, so it should not appear in the VoiceOver rotor for
-            // the second it is on screen.
+            // the moment it is on screen.
             .accessibilityHidden(true)
             .onAppear {
-                // Contact is instant, on the same beat as the focus haptic; only
-                // what follows it is animated.
-                withAnimation(.easeOut(duration: Self.impactDuration)) {
-                    diameter = Self.ringDiameter
-                }
-                withAnimation(.easeOut(duration: Self.rimFadeDuration).delay(Self.impactDuration)) {
-                    rimOpacity = 0
-                }
-                withAnimation(
-                    .easeOut(duration: Self.settleDuration)
-                        .delay(Self.impactDuration + Self.holdDuration)
-                ) {
-                    diameter = Self.dissipatedDiameter
+                // Contact is instant, on the same beat as the focus haptic and
+                // the start of the ripple; only the spread is animated.
+                withAnimation(.easeOut(duration: Self.duration)) {
+                    diameter = Self.spreadDiameter
                     opacity = 0
                 }
             }

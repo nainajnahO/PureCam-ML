@@ -41,6 +41,10 @@ struct CameraFeedView: View {
                     )
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .opacity(showRAWPreview ? 0 : 1)
+                        // The focus ripple warps the preview itself rather than
+                        // drawing over it, so it is a modifier on the camera
+                        // rather than another layer of this ZStack.
+                        .focusRipple(focusReticle)
 
                     if showRAWPreview, let previewImage = rawPreviewImage {
                         // CameraService applies the same fixed orientation the live
