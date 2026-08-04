@@ -44,6 +44,7 @@ struct ContentView: View {
                 },
                 focusReticle: scene.cameraVM.focusReticle,
                 focusRippleFrame: scene.cameraVM.focusRippleFrame,
+                focusSettled: scene.cameraVM.focusSettled,
                 onFocusTap: { viewPoint, devicePoint in
                     scene.cameraVM.focusTapped(viewPoint: viewPoint, devicePoint: devicePoint)
                 }

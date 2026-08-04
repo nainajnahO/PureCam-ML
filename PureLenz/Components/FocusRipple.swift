@@ -17,20 +17,19 @@
 import SwiftUI
 
 extension View {
-    /// Ripples this view outward from the given focus tap, restarting on each
-    /// new tap. Applied to the app-drawn copy of the viewfinder — see `FocusRipple`.
-    func focusRipple(_ focus: (point: CGPoint, token: UUID)?) -> some View {
-        modifier(FocusRipple(focus: focus))
+    /// Ripples this view outward from `origin`, releasing when `settled` flips.
+    /// Applied to the app-drawn copy of the viewfinder — see `FocusRipple`.
+    func focusRipple(origin: CGPoint, settled: Bool) -> some View {
+        modifier(FocusRipple(origin: origin, settled: settled))
     }
 }
 
-/// A droplet ripple run across the viewfinder by `FocusRipple.metal`.
+/// A droplet ripple run across the viewfinder by `FocusRipple.metal`, lasting
+/// exactly as long as the focus it reports.
 ///
 /// The shader displaces where each pixel is *sampled from*, so the scene itself
-/// bulges and settles rather than having anything drawn over it. That is what
-/// Liquid Glass claims to do — bend what is behind it — and it doubles as a
-/// picture of what the hardware is doing, since a lens is curved glass and it is
-/// refocusing.
+/// bulges and settles rather than having anything drawn over it — a picture of
+/// what the hardware is doing, since a lens is curved glass and it is refocusing.
 ///
 /// **Why this is applied to a copy and not the viewfinder.** A shader effect
 /// needs SwiftUI to rasterize the view it is attached to. The live viewfinder is
@@ -38,83 +37,121 @@ extension View {
 /// the system paints straight to the screen, whose pixels SwiftUI's renderer
 /// never has. Attaching a shader to it replaced the whole preview with SwiftUI's
 /// unavailable-view placeholder. So for the length of the ripple the app draws
-/// the camera itself, from frames pulled through the existing on-demand video
-/// path, and distorts what it draws. See `CameraViewModel.runFocusRipple`.
+/// the camera itself and distorts what it draws. See
+/// `CameraViewModel.runFocusRipple`.
 ///
-/// (`.glassEffect` works directly on the viewfinder where a shader cannot,
-/// because it samples the *composited backdrop* rather than the view's own
-/// content — which is why the buttons have always refracted the camera.)
+/// **Why the wave lingers rather than simply running longer.** The ripple starts
+/// the instant the screen is tapped, but focus does not report back until later,
+/// so there is no duration to stretch the wave to at the moment it begins. One
+/// wave can only span an unknown length if it has somewhere to wait. So the
+/// clock driving it eases *out*: the wave unfolds at full pace, then slows to a
+/// crawl and hangs in its own tail until the lens lands, at which point
+/// `settled` releases it. One warp, one wave equation, a variable-rate clock —
+/// no second ring and no separate confirmation beat.
+///
+/// This is why the shader is tuned slow and long-lived (`decay` 2.0 rather than
+/// 7, `speed` 500 rather than 1400): a wave tuned to die in 0.7s has nothing
+/// left to hold with. The release is what kills it now, not the decay.
 struct FocusRipple: ViewModifier {
-    // `nonisolated` because `keyframeAnimator`'s content closure is @Sendable —
-    // a SwiftUI view's members are main-actor isolated by default, and the
-    // closure cannot reach them. These are immutable Sendable scalars, so
-    // opting them out is free.
+    /// Wave-time at which the wave is fully spent. Not seconds on the clock —
+    /// the clock runs at whatever rate the focus wait demands.
+    private static let waveLife: Double = 1.3
 
-    /// Seconds from the tap to the scene being still again — and therefore how
-    /// long the app holds the viewfinder. Kept short: this is the window where
-    /// the frame pipeline is awake and the preview is a copy.
-    nonisolated static let duration: TimeInterval = 0.7
+    /// How far into its life the wave creeps while waiting on the lens. Short of
+    /// `waveLife`, so there is always something left to release.
+    private static let sustainTarget: Double = 0.9
 
-    /// The same span as the view model's clock for the frame pull and the focus
-    /// state, so all three end together.
-    nonisolated static let lifetime: Duration = .seconds(duration)
+    /// Real seconds the unfold-and-linger phase is spread over. `easeOut` puts
+    /// most of the movement at the front, so the tap is answered immediately and
+    /// the slowing happens in the tail. Sized past `CameraService`'s focus
+    /// timeout so the wave is still holding when even a slow lens gives up.
+    private static let sustainSpan: TimeInterval = 1.7
+
+    /// Real seconds from the lens landing to the scene being still.
+    static let releaseDuration: Duration = .seconds(0.32)
+    private static let releaseSeconds: TimeInterval = 0.32
+
+    let origin: CGPoint
+    /// Flips once the lens has stopped scanning; see `CameraViewModel.focusSettled`.
+    let settled: Bool
+
+    @State private var waveTime: Double = 0
+
+    func body(content: Content) -> some View {
+        content
+            .modifier(RippleWave(waveTime: waveTime, origin: origin))
+            // `task(id:)` rather than `onChange`: this runs on appear *and* on
+            // change, so it covers a lens that reports back before the copy is
+            // even on screen — which `onChange` alone would sleep straight
+            // through, leaving the warp hanging forever.
+            .task(id: settled) {
+                if settled {
+                    withAnimation(.easeOut(duration: Self.releaseSeconds)) {
+                        waveTime = Self.waveLife
+                    }
+                } else {
+                    withAnimation(.easeOut(duration: Self.sustainSpan)) {
+                        waveTime = Self.sustainTarget
+                    }
+                }
+            }
+    }
+}
+
+/// Carries the wave's clock into the shader.
+///
+/// `Animatable` is what makes a plain `Double` interpolate: SwiftUI only
+/// animates values it is told are animatable, and a number handed to a shader is
+/// not one by default. Conforming here also means SwiftUI drives `waveTime` per
+/// frame *inside this modifier*, without re-running the view that owns it.
+private struct RippleWave: ViewModifier, Animatable {
+    var waveTime: Double
+    let origin: CGPoint
+
+    var animatableData: Double {
+        get { waveTime }
+        set { waveTime = newValue }
+    }
+
+    // `nonisolated` because a SwiftUI view's members are main-actor isolated by
+    // default and the shader arguments are read outside that. Immutable Sendable
+    // scalars, so opting them out is free.
 
     /// Peak sample displacement, in points. Also bounds `maxSampleOffset`, which
     /// tells SwiftUI how far outside its bounds the effect may reach.
     nonisolated private static let amplitude: Float = 18
-    /// ~2.5Hz, so one crest and a much weaker trough land inside the decay.
-    nonisolated private static let frequency: Float = 16
-    nonisolated private static let decay: Float = 7
-    /// Wavefront speed, points per second.
-    nonisolated private static let speed: Float = 1400
+    /// ~1.75Hz. Slow enough that a crest is still legible while the wave waits.
+    nonisolated private static let frequency: Float = 11
+    /// Low, so the wave survives long enough to be held. The release ends it.
+    nonisolated private static let decay: Float = 2.0
+    /// Wavefront speed, points per second of wave-time. Slow enough that the
+    /// crest is still near the tap while the lens works, rather than having run
+    /// off-screen with nothing left to linger.
+    nonisolated private static let speed: Float = 500
     /// Distance over which the ripple dies out. Keeps it a local disturbance at
     /// the tap rather than a screen-wide wobble.
-    nonisolated private static let radius: Float = 220
-
-    let focus: (point: CGPoint, token: UUID)?
-
-    @State private var origin: CGPoint?
-    @State private var tap: UUID?
+    nonisolated private static let radius: Float = 200
 
     func body(content: Content) -> some View {
-        // Captured by value for the same @Sendable reason as the constants above.
-        let rippleOrigin = origin
+        let time = Float(waveTime)
+        let x = Float(origin.x)
+        let y = Float(origin.y)
 
-        return content
-            // `keyframeAnimator` rather than a `TimelineView` clock: it drives
-            // `elapsed` per frame internally, and its `trigger:` restarts the
-            // wave cleanly when a second tap lands mid-ripple.
-            .keyframeAnimator(initialValue: 0.0, trigger: tap) { view, elapsed in
-                view.distortionEffect(
-                    ShaderLibrary.focusRipple(
-                        .float2(Float(rippleOrigin?.x ?? 0), Float(rippleOrigin?.y ?? 0)),
-                        .float(Float(elapsed)),
-                        .float(Self.amplitude),
-                        .float(Self.frequency),
-                        .float(Self.decay),
-                        .float(Self.speed),
-                        .float(Self.radius)
-                    ),
-                    maxSampleOffset: CGSize(
-                        width: CGFloat(Self.amplitude), height: CGFloat(Self.amplitude)
-                    ),
-                    // Off at both ends, so the copy is never shown through an
-                    // idle shader pass and cannot ripple from (0,0) before a tap.
-                    isEnabled: rippleOrigin != nil && elapsed > 0 && elapsed < Self.duration
-                )
-            } keyframes: { _ in
-                // `elapsed` is simply seconds since the tap; all of the shaping
-                // lives in the shader, where it can vary with distance too.
-                LinearKeyframe(Self.duration, duration: Self.duration)
-            }
-            // `task(id:)` rather than `onChange`: the copy appears at the same
-            // moment as the first tap, so this view is *created* with its focus
-            // already set. `onChange` alone would never see a change and the
-            // first ripple of every session would silently not run.
-            .task(id: focus?.token) {
-                guard let focus else { return }
-                origin = focus.point
-                tap = focus.token
-            }
+        return content.distortionEffect(
+            ShaderLibrary.focusRipple(
+                .float2(x, y),
+                .float(time),
+                .float(Self.amplitude),
+                .float(Self.frequency),
+                .float(Self.decay),
+                .float(Self.speed),
+                .float(Self.radius)
+            ),
+            maxSampleOffset: CGSize(
+                width: CGFloat(Self.amplitude), height: CGFloat(Self.amplitude)
+            ),
+            // Off at rest, so the copy is never shown through an idle shader pass.
+            isEnabled: time > 0
+        )
     }
 }

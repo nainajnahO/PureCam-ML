@@ -70,6 +70,11 @@ class CameraViewModel {
     /// camera itself and distorts that instead.
     private(set) var focusRippleFrame: UIImage?
 
+    /// Whether the lens has stopped scanning for the current tap. The warp
+    /// unfolds and then lingers until this flips, at which point it releases —
+    /// so the one wave lasts exactly as long as the focus it is reporting.
+    private(set) var focusSettled = false
+
     /// Runs one ripple end to end: pulls the frames, holds the focus state, and
     /// clears both. Cancelled by a newer tap so a stale run cannot dismiss the
     /// current one.
@@ -80,6 +85,9 @@ class CameraViewModel {
     /// native size alone — the copy standing in for the viewfinder should not be
     /// visibly softer than the viewfinder. This is the effect's main cost dial.
     private static let rippleFrameSize: CGFloat = 2400
+
+    /// Shortest the warp may run before focus is allowed to end it.
+    private static let minimumRippleRun: Duration = .seconds(0.3)
 
     // MARK: - Initialization
 
@@ -228,24 +236,53 @@ class CameraViewModel {
         let first = await cameraService.nextFramingPreviewImage(maxDimension: Self.rippleFrameSize)
         guard !Task.isCancelled else { return }
 
+        focusSettled = false
         focusRippleFrame = first
         focusReticle = (point: viewPoint, token: UUID())
 
-        if first != nil {
-            let clock = ContinuousClock()
-            let deadline = clock.now + FocusRipple.lifetime
-            while !Task.isCancelled, clock.now < deadline {
-                guard let frame = await cameraService.nextFramingPreviewImage(
-                    maxDimension: Self.rippleFrameSize
-                ) else { break }
-                guard !Task.isCancelled else { break }
-                focusRippleFrame = frame
-            }
-        } else {
+        guard first != nil else {
             // No frame arrived (session not running) — still mark the point, so
             // a tap is never left unacknowledged just because the copy failed.
-            try? await Task.sleep(for: FocusRipple.lifetime)
+            try? await Task.sleep(for: FocusRipple.releaseDuration)
+            guard !Task.isCancelled else { return }
+            focusReticle = nil
+            return
         }
+
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        // Wait on the lens and keep the copy fed at the same time: the warp has
+        // to stay live for however long focus takes, which is not known up front.
+        async let settled: Void = cameraService.awaitFocusSettled()
+
+        let pump = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self,
+                      let frame = await self.cameraService.nextFramingPreviewImage(
+                          maxDimension: Self.rippleFrameSize
+                      ) else { break }
+                guard !Task.isCancelled else { break }
+                self.focusRippleFrame = frame
+            }
+        }
+
+        await settled
+
+        // A lens that was already right can report back almost immediately. Give
+        // the warp its opening beat regardless, or a quick focus would register
+        // as a flinch rather than a ripple.
+        let elapsed = clock.now - start
+        if elapsed < Self.minimumRippleRun {
+            try? await Task.sleep(for: Self.minimumRippleRun - elapsed)
+        }
+
+        guard !Task.isCancelled else { pump.cancel(); return }
+        focusSettled = true
+
+        // Hold the copy while the warp releases, then hand the viewfinder back.
+        try? await Task.sleep(for: FocusRipple.releaseDuration)
+        pump.cancel()
 
         guard !Task.isCancelled else { return }
         focusRippleFrame = nil

@@ -30,6 +30,8 @@ struct CameraFeedView: View {
     /// The app-drawn copy of the viewfinder that the focus ripple warps, present
     /// only while a ripple runs (see `FocusRipple`).
     var focusRippleFrame: UIImage? = nil
+    /// Whether the lens has settled for the current tap; releases the warp.
+    var focusSettled: Bool = false
     /// Surfaces a viewfinder tap, already converted to a sensor point (see `CameraPreview`).
     var onFocusTap: ((_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)? = nil
 
@@ -53,13 +55,19 @@ struct CameraFeedView: View {
                     // framing. The live preview is left running underneath: the
                     // copy is opaque, and where the warp samples past its edge,
                     // live pixels show through instead of black.
-                    if let focusRippleFrame {
+                    if let focusRippleFrame, let focusReticle {
                         Image(uiImage: focusRippleFrame)
                             .resizable()
                             .scaledToFill()
                             .frame(width: geometry.size.width, height: geometry.size.height)
                             .clipped()
-                            .focusRipple(focusReticle)
+                            .focusRipple(origin: focusReticle.point, settled: focusSettled)
+                            // A fresh identity per tap, so the wave's clock
+                            // restarts from zero instead of animating on from
+                            // wherever the last one finished. Safe to re-identify
+                            // here in a way it would not be on `CameraPreview`:
+                            // this is a plain Image, not a live capture layer.
+                            .id(focusReticle.token)
                     }
 
                     if showRAWPreview, let previewImage = rawPreviewImage {
