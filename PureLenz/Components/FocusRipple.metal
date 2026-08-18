@@ -19,7 +19,7 @@
 
 using namespace metal;
 
-/// A droplet ripple, as a `distortionEffect` on the viewfinder.
+/// A punched waterbed, as a `distortionEffect` on the viewfinder.
 ///
 /// Returns, for each destination pixel, the position to sample the source from —
 /// so displacing that sample point outward along the radius makes the scene
@@ -28,11 +28,16 @@ using namespace metal;
 ///
 /// Every point sits still until the wavefront reaches it (`dist / speed`), then
 /// oscillates once through a crest and a trough and settles. That delay is what
-/// makes the ring *travel* rather than the whole area pulsing together.
+/// makes the wobble *spread* rather than the whole area pulsing together.
 ///
-/// Two independent decays keep it a local disturbance instead of a screen-wide
-/// wobble: `decay` fades the oscillation over time at any given point, and
-/// `radius` fades its amplitude with distance from the tap.
+/// The spatial profile is the slope of a Gaussian dent of width `sigma`. A
+/// membrane refracts by its slope, not its depth: the middle of the dent is its
+/// flattest point, so the tap point itself stays optically still and the action
+/// is a soft bulge ringing it, peaking at `sigma` and gone by ~2.5 `sigma`. This
+/// is also what keeps the centre from acting as a black hole — near the origin
+/// the offset grows like `amplitude · e^0.5 · dist / sigma`, so as long as
+/// `sigma` stays comfortably above ~3× `amplitude`, sample positions can never
+/// converge on or cross the tap point.
 ///
 /// - Parameters:
 ///   - position: Destination pixel, in the view's own points.
@@ -42,7 +47,7 @@ using namespace metal;
 ///   - frequency: Oscillation rate, radians per second.
 ///   - decay: Temporal falloff; larger settles sooner.
 ///   - speed: How fast the wavefront travels outward, points per second.
-///   - radius: Distance over which the ripple dies out, in points.
+///   - sigma: Width of the dent, in points — where the bulge peaks.
 [[ stitchable ]] float2 focusRipple(
     float2 position,
     float2 origin,
@@ -51,7 +56,7 @@ using namespace metal;
     float frequency,
     float decay,
     float speed,
-    float radius
+    float sigma
 ) {
     float2 delta = position - origin;
     float dist = length(delta);
@@ -68,10 +73,14 @@ using namespace metal;
         return position;
     }
 
+    // Slope of a Gaussian dent of width sigma, normalized to peak at 1 where
+    // dist == sigma.
+    float slope = (dist / sigma) * exp(0.5 - (dist * dist) / (2.0 * sigma * sigma));
+
     float offset = amplitude
         * sin(frequency * local)
         * exp(-decay * local)
-        * exp(-dist / radius);
+        * slope;
 
     return position + (delta / dist) * offset;
 }
