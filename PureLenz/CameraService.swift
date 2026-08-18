@@ -16,6 +16,7 @@
 
 import SwiftUI
 import AVFoundation
+import CoreLocation
 import Observation
 import Photos
 import OSLog
@@ -116,6 +117,15 @@ class CameraService: NSObject {
     }
 
     private var currentCaptureMode: CaptureMode = .save
+
+    // Warm location fix for geotagging. Created here so the when-in-use prompt
+    // and GPS warm-up happen when the camera opens, not at first capture.
+    private let locationService = LocationService()
+
+    /// The fix snapshotted at shutter time for the capture in flight, so the
+    /// Photos save (which runs later) tags where the shot was taken, not where
+    /// the device is by save time. Same in-flight pattern as currentCaptureMode.
+    private var inFlightCaptureLocation: CLLocation?
 
     // Exposure State
     var currentISO: Float = 0
@@ -699,6 +709,7 @@ class CameraService: NSObject {
             return
         }
         currentCaptureMode = mode
+        inFlightCaptureLocation = locationService.latestLocation
 
         // Capture RAW only
         guard let rawFormat = output.availableRawPhotoPixelFormatTypes.first else {
@@ -718,6 +729,13 @@ class CameraService: NSObject {
         }
 
         let settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
+
+        // Embed GPS EXIF in the DNG itself. No fix (permission denied, or none
+        // yet) simply means no GPS tags — the photo saves normally.
+        if let location = inFlightCaptureLocation {
+            settings.metadata[kCGImagePropertyGPSDictionary as String] = location.exifGPSDictionary
+        }
+
         output.capturePhoto(with: settings, delegate: self)
     }
 
@@ -790,7 +808,7 @@ class CameraService: NSObject {
         }
     }
 
-    private func savePhotoAsRAW(rawData: Data) async {
+    private func savePhotoAsRAW(rawData: Data, location: CLLocation?) async {
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else { return }
 
@@ -802,7 +820,10 @@ class CameraService: NSObject {
         do {
             try rawData.write(to: tempRAWURL)
             try await PHPhotoLibrary.shared().performChanges {
-                PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: tempRAWURL)
+                let request = PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: tempRAWURL)
+                // Cheap guarantee the library asset is geotagged even if a
+                // reader ignores the DNG's embedded GPS tags.
+                request?.location = location
             }
             try? FileManager.default.removeItem(at: tempRAWURL)
             Logger.camera.debug("Saved pure RAW (DNG)")
@@ -826,6 +847,8 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
         // Reset to save mode for next capture
         let mode = currentCaptureMode
         currentCaptureMode = .save
+        let location = inFlightCaptureLocation
+        inFlightCaptureLocation = nil
 
         if let error {
             Logger.camera.error("Capture failed: \(error.localizedDescription)")
@@ -838,7 +861,7 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
             // Save pure RAW
             Logger.camera.debug("Saving pure RAW")
             guard let rawData = photo.fileDataRepresentation() else { return }
-            Task { await savePhotoAsRAW(rawData: rawData) }
+            Task { await savePhotoAsRAW(rawData: rawData, location: location) }
 
         case .preview:
             // Preview RAW (no save)
