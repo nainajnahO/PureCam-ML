@@ -578,6 +578,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "PureLenz needs access to your camera to capture photos";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "PureLenz uses your location to record where each photo was taken";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "PureLenz needs access to your camera to capture and preview high-quality photos";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -623,6 +624,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "PureLenz needs access to your camera to capture photos";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "PureLenz uses your location to record where each photo was taken";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "PureLenz needs access to your camera to capture and preview high-quality photos";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
