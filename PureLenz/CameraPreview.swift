@@ -129,6 +129,12 @@ struct CameraPreview: UIViewRepresentable {
         // AVCaptureDevice.RotationCoordinator in CameraService.
         let angle: CGFloat = 90
 
+        // Only touch the connection when the angle actually differs. While a
+        // focus ripple runs, a new copied frame arrives ~30×/second and each one
+        // re-runs `updateUIView`; re-setting an unchanged rotation on the live
+        // capture connection that often is work the viewfinder should not pay.
+        guard layer.connection?.videoRotationAngle != angle else { return }
+
         if layer.connection?.isVideoRotationAngleSupported(angle) == true {
             layer.connection?.videoRotationAngle = angle
         }

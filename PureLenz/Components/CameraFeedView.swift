@@ -27,6 +27,11 @@ struct CameraFeedView: View {
     /// overlay so it shares the preview's coordinate space — the tap point is
     /// reported in the preview's own bounds.
     var focusReticle: (point: CGPoint, token: UUID)? = nil
+    /// The app-drawn copy of the viewfinder that the focus ripple warps, present
+    /// only while a ripple runs (see `FocusRipple`).
+    var focusRippleFrame: UIImage? = nil
+    /// Whether the lens has settled for the current tap; releases the warp.
+    var focusSettled: Bool = false
     /// Surfaces a viewfinder tap, already converted to a sensor point (see `CameraPreview`).
     var onFocusTap: ((_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)? = nil
 
@@ -41,6 +46,29 @@ struct CameraFeedView: View {
                     )
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .opacity(showRAWPreview ? 0 : 1)
+
+                    // The focus ripple's warped copy of the viewfinder. SwiftUI
+                    // cannot bend the preview layer itself, so while this is up
+                    // the app is drawing the camera and distorting what it draws.
+                    // Laid out exactly like the RAW snapshot below, which is
+                    // already proven to match the live preview's aspect-fill
+                    // framing. The live preview is left running underneath: the
+                    // copy is opaque, and where the warp samples past its edge,
+                    // live pixels show through instead of black.
+                    if let focusRippleFrame, let focusReticle {
+                        Image(uiImage: focusRippleFrame)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .clipped()
+                            .focusRipple(origin: focusReticle.point, settled: focusSettled)
+                            // A fresh identity per tap, so the wave's clock
+                            // restarts from zero instead of animating on from
+                            // wherever the last one finished. Safe to re-identify
+                            // here in a way it would not be on `CameraPreview`:
+                            // this is a plain Image, not a live capture layer.
+                            .id(focusReticle.token)
+                    }
 
                     if showRAWPreview, let previewImage = rawPreviewImage {
                         // CameraService applies the same fixed orientation the live

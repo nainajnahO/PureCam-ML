@@ -44,6 +44,11 @@ class CameraService: NSObject {
     // session's lifetime (see `configureSession`), not per tap.
     private var subjectAreaObserver: NSObjectProtocol?
 
+    /// Callers waiting for the current focus scan to settle. Only ever touched on
+    /// `sessionQueue`, which is what guarantees each continuation resumes exactly
+    /// once whether the lens or the timeout gets there first.
+    private var pendingFocusSettles: [(id: UUID, continuation: CheckedContinuation<Void, Never>)] = []
+
     // The in-flight one-shot metering pass started by `holdCurrentExposure()`.
     // Both are torn down the instant the app adopts the metered value, so
     // nothing here outlives the seed — see that method's doc comment for why
@@ -351,6 +356,62 @@ class CameraService: NSObject {
             } catch {
                 Logger.camera.error("Failed to lock configuration for focus: \(error.localizedDescription)")
             }
+        }
+    }
+
+    /// Resolves when the scan started by `focus(at:)` has settled, or after
+    /// `timeout` — whichever comes first.
+    ///
+    /// AVFoundation has no completion callback for autofocus. The one handler it
+    /// offers, `setFocusModeLockedWithLensPosition(_:completionHandler:)`, is for
+    /// driving the lens to an explicit position, not for a scan. What the device
+    /// does publish is state: `.autoFocus` means "scan once, then set `focusMode`
+    /// to `.locked` yourself", and that transition is KVO-observable. So the mode
+    /// arriving at `.locked` *is* the completion signal for the request this app
+    /// makes — more precise than `isAdjustingFocus`, which is a general "is the
+    /// lens moving" flag and may never turn on at all when the lens is already
+    /// where it needs to be.
+    func awaitFocusSettled(timeout: TimeInterval = 1.5) async {
+        // Ordered behind the `focus(at:)` this is waiting on. `sessionQueue` is
+        // serial, so by the time this lands the new scan has been requested and
+        // `focusMode` is no longer whatever the *previous* tap left locked.
+        await withCheckedContinuation { continuation in
+            sessionQueue.async { continuation.resume() }
+        }
+
+        guard let input = session.inputs.first as? AVCaptureDeviceInput else { return }
+        let device = input.device
+        let id = UUID()
+        var observation: NSKeyValueObservation?
+
+        await withCheckedContinuation { continuation in
+            sessionQueue.async { [weak self] in
+                self?.pendingFocusSettles.append((id, continuation))
+            }
+
+            observation = device.observe(\.focusMode, options: [.initial, .new]) { [weak self] device, _ in
+                guard device.focusMode == .locked else { return }
+                self?.resolveFocusSettle(id)
+            }
+
+            // The lens can also simply never settle — a blank wall, or a mode the
+            // device would not take. Nothing may then be waiting on the other end
+            // of this, so the timeout is what stops a ripple hanging open.
+            sessionQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                self?.resolveFocusSettle(id)
+            }
+        }
+
+        observation?.invalidate()
+    }
+
+    /// Resume one waiter, if it is still waiting. Hops to `sessionQueue` so the
+    /// removal and the resume are atomic with respect to every other caller.
+    private func resolveFocusSettle(_ id: UUID) {
+        sessionQueue.async { [weak self] in
+            guard let self,
+                  let index = self.pendingFocusSettles.firstIndex(where: { $0.id == id }) else { return }
+            self.pendingFocusSettles.remove(at: index).continuation.resume()
         }
     }
 

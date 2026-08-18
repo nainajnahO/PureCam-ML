@@ -16,55 +16,50 @@
 
 import SwiftUI
 
-/// The square that marks where a focus tap landed: scales in, holds, fades out.
+/// The point of contact: a neutral hairline that flashes where the tap landed
+/// and is gone in a third of a second.
 ///
-/// Hand-drawn because there is no system-provided focus reticle — UIKit and
-/// SwiftUI both leave this to the app. Yellow to match the framing indicator's
-/// crop rectangle, which is the app's existing "this is what the camera is
-/// doing" colour.
+/// The ripple (`FocusRipple`) is the real answer to "where did I focus" — this
+/// only covers what refraction physically cannot. A distortion needs detail to
+/// bend, so over a flat bright sky or a dark low-contrast wall the ripple has
+/// nothing to work with and the tap would register as nothing at all. This is
+/// the floor under that case, kept deliberately brief and colourless so it reads
+/// as the droplet's contact rather than as a marker sitting on the scene.
+///
+/// White rather than the old yellow, which now means "framing" alone again
+/// (`FramingIndicator`).
 ///
 /// The animation runs from `onAppear` and is not driven by any external state,
 /// so a fresh SwiftUI identity per tap (see `CameraViewModel.focusReticle`) is
 /// what restarts it.
 struct FocusReticle: View {
-    private static let appearDuration = 0.2
-    private static let holdDuration = 0.7
-    private static let fadeDuration = 0.35
-
-    /// Time from the start of the scale-in to the end of the fade-out.
-    /// `CameraViewModel` clears its reticle state after exactly this, so the
-    /// square is removed as it becomes invisible rather than while still fading.
-    static let lifetime: Duration = .seconds(appearDuration + holdDuration + fadeDuration)
+    private static let duration = 0.32
 
     /// Deliberately not scaled by `UIConstants.globalScale`: that governs the
     /// size of the controls, while this marks a point in the scene.
-    private let size: CGFloat = 80
+    private static let contactDiameter: CGFloat = 22
+    private static let spreadDiameter: CGFloat = 66
 
-    @State private var scale: CGFloat = 1.35
-    @State private var opacity: Double = 0
+    @State private var diameter = FocusReticle.contactDiameter
+    @State private var opacity: Double = 0.55
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 4)
-            .stroke(.yellow, lineWidth: 1.5)
-            .frame(width: size, height: size)
-            .scaleEffect(scale)
+        Circle()
+            .stroke(.white, lineWidth: 1)
+            .frame(width: diameter, height: diameter)
             .opacity(opacity)
             // The reticle sits over the viewfinder, so it must never swallow the
             // next tap.
             .allowsHitTesting(false)
             // Purely decorative — the focus it marks is not an element to
             // navigate to, so it should not appear in the VoiceOver rotor for
-            // the second-and-a-bit it is on screen.
+            // the moment it is on screen.
             .accessibilityHidden(true)
             .onAppear {
-                withAnimation(.easeOut(duration: Self.appearDuration)) {
-                    scale = 1
-                    opacity = 1
-                }
-                withAnimation(
-                    .easeIn(duration: Self.fadeDuration)
-                        .delay(Self.appearDuration + Self.holdDuration)
-                ) {
+                // Contact is instant, on the same beat as the focus haptic and
+                // the start of the ripple; only the spread is animated.
+                withAnimation(.easeOut(duration: Self.duration)) {
+                    diameter = Self.spreadDiameter
                     opacity = 0
                 }
             }
