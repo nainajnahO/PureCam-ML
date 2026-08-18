@@ -212,8 +212,9 @@ private struct RippleDotMatrix: View, Animatable {
     private static let spacing: CGFloat = 7
     private static let dotDiameter: CGFloat = 2
     /// Brightness decays exponentially from the centre; ~63% is gone by this
-    /// distance, halved every ~42pt.
-    private static let falloff: CGFloat = 60
+    /// distance, halved every ~36pt. Judged on device: 45 died too hard, 60
+    /// reached too far.
+    private static let falloff: CGFloat = 52
     /// Grid extent, and where the fade lands on exactly zero. The exponential
     /// alone never reaches zero — and a few percent of a two-stops-up white is
     /// still visible — so the last stretch is windowed down to nothing (see
