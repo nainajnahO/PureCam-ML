@@ -45,19 +45,38 @@ enum WaterTuning {
     /// Extra fraction of height lost per step at the outermost cell, ramping
     /// quadratically to nothing at the sponge's inner edge.
     static let spongeAbsorb: Float = 0.15
-    /// Depth the finger presses the surface to, in height units. Only ratios
-    /// of heights matter; this is the unit everything else is relative to.
-    static let dentDepth: Float = 1
+    /// Depth a still or slow finger presses the surface to, in height units.
+    /// Only ratios of heights matter; this is the unit everything else is
+    /// relative to.
+    static let dentDepth: Float = 1.3
+    /// Depth at `planingSpeed` and above. A finger moving fast through water
+    /// rides up and penetrates less, so a quick sweep leaves a shallower dent
+    /// than a slow one; the slow sweep is where the warp should be felt.
+    static let planedDepth: Float = 1
+    /// Finger speed, points per second, at which the dent has fully planed
+    /// down to `planedDepth`. Depth falls linearly between rest and this.
+    static let planingSpeed: CGFloat = 600
+    /// Seconds over which the finger's speed is smoothed before it sets the
+    /// depth — touch events are jittery, and a dent that flickered in depth
+    /// would shed rings of its own.
+    static let speedSmoothing: Double = 0.08
     /// Width of the finger's dent, in points (Gaussian σ).
     static let dentSigma: CGFloat = 22
     /// Fraction of the way the surface is pulled toward the dent each step. A
     /// soft contact; 1 would be a hard clamp with a harsher bow wave.
     static let grip: Float = 0.3
-    /// Slope (height per cell) that counts as full refraction. The held dent's
-    /// steepest point is about 0.11.
-    static let maxSlope: Float = 0.12
-    /// Sample offset, in points, at full slope. Also bounds `maxSampleOffset`.
-    static let strength: CGFloat = 18
+    /// Slope (height per cell) that counts as full refraction. The resting
+    /// dent's steepest point is about 0.14; the planed dent's about 0.11.
+    static let maxSlope: Float = 0.15
+    /// Sample offset, in points, at full slope — how far the scene *under* the
+    /// water shifts when refracted. Also bounds `maxSampleOffset`.
+    static let strength: CGFloat = 24
+    /// How far a dot *on* the surface is carried sideways at full slope, in
+    /// points. Much smaller than `strength`: a point on a dented surface only
+    /// moves a little, while the picture seen through it shifts a lot. At the
+    /// scene's gain the dots near the rim were carried past the centre and
+    /// piled up into one white blob.
+    static let dotStrength: CGFloat = 4
     /// Largest sample offset, in points, at which the surface counts as still.
     /// Half a point is a third of a pixel; cutting from that to the live
     /// viewfinder is invisible.
@@ -69,14 +88,13 @@ enum WaterTuning {
     // The finger's trace — what the dot matrix lights up.
 
     /// How brightly the finger excites the surface around it: full at the
-    /// contact point, ~63% gone by this distance, halved every ~36pt. Judged
-    /// on device: 45 died too hard, 60 reached too far.
-    static let traceFalloff: CGFloat = 52
+    /// contact point, ~63% gone by this distance, halved every ~29pt.
+    static let traceFalloff: CGFloat = 42
     /// The exponential alone never reaches zero — and a few percent of a
     /// two-stops-up white is still visible — so the last stretch is windowed
     /// down to nothing between these two distances instead of cut.
-    static let traceWindowStart: CGFloat = 90
-    static let traceWindowEnd: CGFloat = 150
+    static let traceWindowStart: CGFloat = 70
+    static let traceWindowEnd: CGFloat = 115
     /// Seconds for the trace under a *stationary* finger to reach half
     /// brightness. Fast on purpose: a quick lens can settle in well under a
     /// second, and the glow only registers if it is at full strength for most
@@ -85,7 +103,7 @@ enum WaterTuning {
     /// Seconds for the trace to fade to half once the finger has moved on.
     /// This is the length of the glowing tail behind a drag, and of the fade
     /// once the lens has landed.
-    static let traceHalfLife: Double = 0.3
+    static let traceHalfLife: Double = 0.18
 }
 
 /// One frame of the surface as views read it: slope per cell for refraction,
@@ -100,11 +118,11 @@ struct WaterField {
     var cellsWide = 0
     var cellsHigh = 0
 
-    /// The shader's sample offset at `point`, in points — the same bilinear
-    /// blend of the same array, so anything drawn with this moves with the
-    /// scene. Content (the dots) takes the negative: the shader moves where a
-    /// pixel is *sampled from*, which moves what is seen the other way.
-    func displacement(at point: CGPoint) -> CGVector {
+    /// The normalised slope at `point` — the same bilinear blend of the same
+    /// array the shader samples, so anything moved by it tilts with the scene.
+    /// Times `WaterTuning.strength` it is the shader's sample offset; times
+    /// `WaterTuning.dotStrength` it is how far a dot on the surface is carried.
+    func slope(at point: CGPoint) -> CGVector {
         guard cellsWide > 0 else { return .zero }
         let (xa, xb, ya, yb, tx, ty) = cells(around: point)
         func slope(_ x: Int, _ y: Int) -> SIMD2<Float> {
@@ -114,10 +132,7 @@ struct WaterField {
         let top = slope(xa, ya) + (slope(xb, ya) - slope(xa, ya)) * tx
         let bottom = slope(xa, yb) + (slope(xb, yb) - slope(xa, yb)) * tx
         let g = top + (bottom - top) * ty
-        return CGVector(
-            dx: CGFloat(g.x) * WaterTuning.strength,
-            dy: CGFloat(g.y) * WaterTuning.strength
-        )
+        return CGVector(dx: CGFloat(g.x), dy: CGFloat(g.y))
     }
 
     /// The finger's trace at `point`, 0…1.
@@ -203,6 +218,12 @@ final class WaterSurface: NSObject {
     /// Exact finger position in points — never snapped to a cell, so a slow
     /// drag moves the dent continuously rather than in 4pt hops.
     @ObservationIgnored private var finger = CGPoint.zero
+    /// Where the finger was at the last display frame, for its speed.
+    @ObservationIgnored private var fingerBefore = CGPoint.zero
+    /// Smoothed finger speed, points per second.
+    @ObservationIgnored private var fingerSpeed: CGFloat = 0
+    /// The dent's depth this frame, planed by `fingerSpeed`.
+    @ObservationIgnored private var depth = WaterTuning.dentDepth
     @ObservationIgnored private var accumulator: Double = 0
     @ObservationIgnored private var lastTimestamp: CFTimeInterval?
     @ObservationIgnored private var releasedAt: CFTimeInterval = 0
@@ -252,6 +273,8 @@ final class WaterSurface: NSObject {
     func press(at point: CGPoint) {
         guard field.cellsWide > 0 else { return }
         finger = point
+        fingerBefore = point
+        fingerSpeed = 0
         pressed = true
         marking = true
         guard isCalm else { return }
@@ -312,6 +335,10 @@ final class WaterSurface: NSObject {
             ?? (link.targetTimestamp - link.timestamp)
         lastTimestamp = link.timestamp
 
+        if pressed {
+            plane(elapsed: elapsed)
+        }
+
         accumulator = min(accumulator + elapsed, WaterTuning.maxFrameTime)
         while accumulator >= Self.substepDuration {
             step()
@@ -328,6 +355,22 @@ final class WaterSurface: NSObject {
         if !pressed, !marking, still {
             reset()
         }
+    }
+
+    /// Set this frame's dent depth from how fast the finger is moving: full
+    /// depth at rest, shallower the faster it sweeps (see
+    /// `WaterTuning.planedDepth`). Speed is measured frame to frame here rather
+    /// than from touch events, so a finger that stops — and sends no events —
+    /// reads as still.
+    private func plane(elapsed: Double) {
+        let moved = hypot(finger.x - fingerBefore.x, finger.y - fingerBefore.y)
+        fingerBefore = finger
+        let speed = moved / max(elapsed, 0.001)
+        let blend = 1 - exp(-elapsed / WaterTuning.speedSmoothing)
+        fingerSpeed += (speed - fingerSpeed) * blend
+
+        let planing = Float(min(fingerSpeed / WaterTuning.planingSpeed, 1))
+        depth = WaterTuning.dentDepth + (WaterTuning.planedDepth - WaterTuning.dentDepth) * planing
     }
 
     /// One step of the wave equation, then the finger.
@@ -353,8 +396,9 @@ final class WaterSurface: NSObject {
 
                     if pressed {
                         let sigma = Float(WaterTuning.dentSigma / WaterTuning.cellSize)
+                        let depth = self.depth
                         forEachCell(within: 3 * sigma) { i, d2 in
-                            let target = -WaterTuning.dentDepth * exp(-d2 / (2 * sigma * sigma))
+                            let target = -depth * exp(-d2 / (2 * sigma * sigma))
                             next[i] += (target - next[i]) * WaterTuning.grip
                         }
                     }
