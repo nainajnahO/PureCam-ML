@@ -23,17 +23,15 @@ struct CameraFeedView: View {
     /// Surfaces the preview layer's true short-axis crop fraction up to the view
     /// model (see `CameraPreview`); drives the framing indicator's yellow box.
     var onCropFraction: ((CGFloat) -> Void)? = nil
-    /// The active focus reticle, drawn here rather than as a `ContentView`
-    /// overlay so it shares the preview's coordinate space — the tap point is
-    /// reported in the preview's own bounds.
-    var focusReticle: (point: CGPoint, token: UUID)? = nil
-    /// The app-drawn copy of the viewfinder that the focus ripple warps, present
-    /// only while a ripple runs (see `FocusRipple`).
+    /// The water the viewfinder is seen through while focusing. Laid over the
+    /// preview's own bounds, so the finger's point and the surface share a
+    /// coordinate space by construction.
+    let water: WaterSurface
+    /// The app-drawn copy of the viewfinder that the water refracts, present
+    /// only while the water moves (see `WaterRefraction`).
     var focusRippleFrame: UIImage? = nil
-    /// Whether the lens has settled for the current tap; releases the warp.
-    var focusSettled: Bool = false
-    /// Surfaces a viewfinder tap, already converted to a sensor point (see `CameraPreview`).
-    var onFocusTap: ((_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)? = nil
+    /// Surfaces a finger on the viewfinder, already converted to a sensor point (see `CameraPreview`).
+    var onFocusTouch: ((FocusTouchPhase, _ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)? = nil
 
     var body: some View {
         if cameraService.status == .configured {
@@ -42,12 +40,12 @@ struct CameraFeedView: View {
                     CameraPreview(
                         session: cameraService.session,
                         onCropFraction: onCropFraction,
-                        onFocusTap: onFocusTap
+                        onFocusTouch: onFocusTouch
                     )
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .opacity(showRAWPreview ? 0 : 1)
 
-                    // The focus ripple's warped copy of the viewfinder. SwiftUI
+                    // The water's refracted copy of the viewfinder. SwiftUI
                     // cannot bend the preview layer itself, so while this is up
                     // the app is drawing the camera and distorting what it draws.
                     // Laid out exactly like the RAW snapshot below, which is
@@ -55,19 +53,17 @@ struct CameraFeedView: View {
                     // framing. The live preview is left running underneath: the
                     // copy is opaque, and where the warp samples past its edge,
                     // live pixels show through instead of black.
-                    if let focusRippleFrame, let focusReticle {
+                    if let focusRippleFrame {
                         Image(uiImage: focusRippleFrame)
                             .resizable()
                             .scaledToFill()
                             .frame(width: geometry.size.width, height: geometry.size.height)
                             .clipped()
-                            .focusRipple(origin: focusReticle.point, settled: focusSettled)
-                            // A fresh identity per tap, so the wave's clock
-                            // restarts from zero instead of animating on from
-                            // wherever the last one finished. Safe to re-identify
-                            // here in a way it would not be on `CameraPreview`:
-                            // this is a plain Image, not a live capture layer.
-                            .id(focusReticle.token)
+                            .waterRefraction(surface: water)
+                            // The copy sits over the viewfinder while the water
+                            // settles; a finger arriving in that tail must still
+                            // reach the preview underneath.
+                            .allowsHitTesting(false)
                     }
 
                     if showRAWPreview, let previewImage = rawPreviewImage {
@@ -82,12 +78,11 @@ struct CameraFeedView: View {
                             .clipped()
                             .transition(.opacity)
                     }
-
-                    if let focusReticle {
-                        FocusReticle()
-                            .position(focusReticle.point)
-                            .id(focusReticle.token)
-                    }
+                }
+                // Fires at first layout, before any finger can land, and the
+                // preview is framed to this same size.
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                    water.resize(to: size)
                 }
             }
             .ignoresSafeArea()

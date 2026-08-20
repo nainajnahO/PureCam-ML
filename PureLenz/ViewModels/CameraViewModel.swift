@@ -55,39 +55,39 @@ class CameraViewModel {
     /// layer has laid out and reported.
     private(set) var previewCropFraction: CGFloat?
 
-    /// Where the last focus tap landed, in the viewfinder's own coordinates, plus
-    /// a token identifying that tap. The token gives the reticle a fresh SwiftUI
-    /// identity per tap, so tapping again restarts the animation instead of
-    /// inheriting the previous one's half-faded state.
-    private(set) var focusReticle: (point: CGPoint, token: UUID)?
+    /// The water the viewfinder is seen through while focusing. The finger
+    /// presses it, the lens settling releases it, and it goes still on its own.
+    let water = WaterSurface()
 
-    /// The app-drawn copy of the viewfinder that the focus ripple warps. Non-nil
-    /// *only* while a ripple is running.
+    /// The app-drawn copy of the viewfinder that the water refracts. Non-nil
+    /// *only* while the water is moving.
     ///
     /// SwiftUI cannot apply a shader to the live preview — it is a video pane the
     /// system paints straight to the screen, whose pixels SwiftUI never has (see
-    /// `FocusRipple`). So for the length of the animation the app draws the
+    /// `WaterRefraction`). So for as long as the water moves the app draws the
     /// camera itself and distorts that instead.
     private(set) var focusRippleFrame: UIImage?
 
-    /// Whether the lens has stopped scanning for the current tap. The warp
-    /// unfolds and then lingers until this flips, at which point it releases —
-    /// so the one wave lasts exactly as long as the focus it is reporting.
-    private(set) var focusSettled = false
+    /// Keeps the copy fed from the first press until the water is still again.
+    /// One per calm-to-calm session, however many presses happen inside it.
+    private var rippleFramesTask: Task<Void, Never>?
 
-    /// Runs one ripple end to end: pulls the frames, holds the focus state, and
-    /// clears both. Cancelled by a newer tap so a stale run cannot dismiss the
-    /// current one.
-    private var focusReticleTask: Task<Void, Never>?
+    /// Waits on the lens after a lift, then lets the water go. A new press
+    /// cancels it — the finger is back in.
+    private var focusSettleTask: Task<Void, Never>?
+    private var pressStart: ContinuousClock.Instant = .now
 
-    /// Long-edge pixels for the frames the ripple warps. `nextFramingPreviewImage`
+    /// Long-edge pixels for the frames the water refracts. `nextFramingPreviewImage`
     /// only ever downscales, so this is high enough to leave the video output's
     /// native size alone — the copy standing in for the viewfinder should not be
     /// visibly softer than the viewfinder. This is the effect's main cost dial.
     private static let rippleFrameSize: CGFloat = 2400
 
-    /// Shortest the warp may run before focus is allowed to end it.
-    private static let minimumRippleRun: Duration = .seconds(0.3)
+    /// Shortest a press may hold the dent before the lens is allowed to release
+    /// it, measured from touch-down. A lens that was already right can report
+    /// back almost immediately; a dent that appeared and rebounded within a
+    /// few frames would register as a flinch rather than a touch.
+    private static let minimumHold: Duration = .seconds(0.3)
 
     // MARK: - Initialization
 
@@ -112,10 +112,11 @@ class CameraViewModel {
             isCapturingPreview = false
             framingPreviewExpanded = false
             stopFramingPreviewLoop()
-            focusReticleTask?.cancel()
-            focusReticle = nil
-            // Cancelling mid-ripple leaves the copy on screen, which would freeze
-            // the viewfinder on a stale frame until the next tap.
+            rippleFramesTask?.cancel()
+            focusSettleTask?.cancel()
+            water.reset()
+            // Cancelling mid-wave leaves the copy on screen, which would freeze
+            // the viewfinder on a stale frame until the next touch.
             focusRippleFrame = nil
             // Release the lens too, not just the marker for it. `.inactive`
             // covers brief interruptions — Control Center, a banner, the app
@@ -200,93 +201,83 @@ class CameraViewModel {
 
     // MARK: - Focus
 
-    /// Handle a viewfinder tap: focus the lens there and show the reticle.
+    /// A finger on the viewfinder, phase by phase: it presses the water on
+    /// touch-down, drags the dent while it moves, and on lift focuses the lens
+    /// there. The dent is *held* until the lens settles — the finger stays in
+    /// the water while the lens works, and leaves when it lands — so tap and
+    /// drag share one story, and the wait for focus is shown by the same dent
+    /// rather than a second animation.
     ///
     /// Both points come from `CameraPreview`, which is the only place that can
-    /// convert between them correctly — `viewPoint` positions the reticle on
-    /// screen, `devicePoint` is the normalized sensor point focus needs.
+    /// convert between them correctly — `viewPoint` is where the water is
+    /// pressed, `devicePoint` is the normalized sensor point focus needs.
     ///
     /// Exposure is untouched on purpose. See `CameraService.focus(at:)`.
-    func focusTapped(viewPoint: CGPoint, devicePoint: CGPoint) {
-        cameraService.focus(at: devicePoint)
-        hapticManager.impact(.light)
+    func focusTouch(_ phase: FocusTouchPhase, viewPoint: CGPoint, devicePoint: CGPoint) {
+        switch phase {
+        case .began:
+            // A new press supersedes a pending release: the finger is back in.
+            focusSettleTask?.cancel()
+            pressStart = .now
+            let wasCalm = water.isCalm
+            water.press(at: viewPoint)
+            // One pump per calm-to-calm session. A press during the tail of the
+            // last one joins the surface that is already being drawn.
+            if wasCalm, !water.isCalm {
+                startRippleFrames()
+            }
 
-        focusReticleTask?.cancel()
-        focusReticleTask = Task { [weak self] in
-            await self?.runFocusRipple(at: viewPoint)
+        case .moved:
+            water.move(to: viewPoint)
+
+        case .ended:
+            cameraService.focus(at: devicePoint)
+            hapticManager.impact(.light)
+            focusSettleTask = Task { [weak self] in
+                guard let self else { return }
+                // Bounded by `awaitFocusSettled`'s own timeout, so a lens that
+                // never reports still lets go.
+                await cameraService.awaitFocusSettled()
+                let held = ContinuousClock.now - pressStart
+                if held < Self.minimumHold {
+                    try? await Task.sleep(for: Self.minimumHold - held)
+                }
+                guard !Task.isCancelled else { return }
+                water.release()
+            }
+
+        case .cancelled:
+            water.release()
         }
     }
 
-    /// Hold a warped copy of the viewfinder over the real one for the length of
-    /// the ripple, then hand the viewfinder back to the system.
+    /// Hold a refracted copy of the viewfinder over the real one for as long as
+    /// the water moves, then hand the viewfinder back to the system.
     ///
     /// The frame pipeline is woken only for this window. `captureOutput` does no
     /// per-frame work unless a request is pending (`CameraService.swift`), so
     /// pulling frames here and stopping at the end leaves the camera exactly as
-    /// idle as it was before the tap — the effect costs nothing while nobody is
-    /// tapping.
+    /// idle as it was before the touch — the effect costs nothing while nobody
+    /// is touching.
     ///
     /// Frames are pulled live rather than one being frozen, so the lens is seen
-    /// racking focus during the ripple. Freezing would hide the very thing the
-    /// tap was asking for.
-    private func runFocusRipple(at viewPoint: CGPoint) async {
-        // The first frame doubles as the start signal: showing the copy and
-        // starting the animation on the same beat keeps them in step, and the
-        // wait is a single frame.
-        let first = await cameraService.nextFramingPreviewImage(maxDimension: Self.rippleFrameSize)
-        guard !Task.isCancelled else { return }
-
-        focusSettled = false
-        focusRippleFrame = first
-        focusReticle = (point: viewPoint, token: UUID())
-
-        guard first != nil else {
-            // No frame arrived (session not running) — still mark the point, so
-            // a tap is never left unacknowledged just because the copy failed.
-            try? await Task.sleep(for: FocusRipple.releaseDuration)
-            guard !Task.isCancelled else { return }
-            focusReticle = nil
-            return
-        }
-
-        let clock = ContinuousClock()
-        let start = clock.now
-
-        // Wait on the lens and keep the copy fed at the same time: the warp has
-        // to stay live for however long focus takes, which is not known up front.
-        async let settled: Void = cameraService.awaitFocusSettled()
-
-        let pump = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self,
-                      let frame = await self.cameraService.nextFramingPreviewImage(
-                          maxDimension: Self.rippleFrameSize
-                      ) else { break }
-                guard !Task.isCancelled else { break }
-                self.focusRippleFrame = frame
+    /// racking focus through the water. Freezing would hide the very thing the
+    /// touch was asking for.
+    private func startRippleFrames() {
+        rippleFramesTask?.cancel()
+        rippleFramesTask = Task { [weak self] in
+            while let self, !Task.isCancelled, !water.isCalm {
+                // A nil frame means the session is not running; there is
+                // nothing to draw a copy of, and the live preview shows through.
+                guard let frame = await cameraService.nextFramingPreviewImage(
+                    maxDimension: Self.rippleFrameSize
+                ) else { break }
+                guard !Task.isCancelled else { return }
+                focusRippleFrame = frame
             }
+            guard !Task.isCancelled else { return }
+            self?.focusRippleFrame = nil
         }
-
-        await settled
-
-        // A lens that was already right can report back almost immediately. Give
-        // the warp its opening beat regardless, or a quick focus would register
-        // as a flinch rather than a ripple.
-        let elapsed = clock.now - start
-        if elapsed < Self.minimumRippleRun {
-            try? await Task.sleep(for: Self.minimumRippleRun - elapsed)
-        }
-
-        guard !Task.isCancelled else { pump.cancel(); return }
-        focusSettled = true
-
-        // Hold the copy while the warp releases, then hand the viewfinder back.
-        try? await Task.sleep(for: FocusRipple.releaseDuration)
-        pump.cancel()
-
-        guard !Task.isCancelled else { return }
-        focusRippleFrame = nil
-        focusReticle = nil
     }
 
     /// Toggle the framing-indicator HUD between the small outline schematic and
