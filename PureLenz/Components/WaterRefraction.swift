@@ -95,10 +95,12 @@ struct WaterRefraction: ViewModifier {
 /// shader uses — and draws it already-moved, in a plain SwiftUI layer the
 /// renderer keeps in extended range.
 ///
-/// They move by the slope at their own, smaller gain. The scene is seen
-/// *through* the water and refracts by `strength`; the dots sit *on* it, and a
-/// point on a dented surface is only carried a little toward the dent. At the
-/// scene's gain the dots near the rim overshot the centre and piled up.
+/// They ride the waves at the scene's gain, so a passing ring carries them
+/// exactly as far as it bends the picture — but the finger's own dent moves
+/// them only a little. The surface hands over the dent it is imposing
+/// (`WaterField.dent`), so the dots can take the waves (everything else) at
+/// `strength` and the dent at `dotStrength`. At one shared gain the dots near
+/// the dent's rim overshot the centre and piled up into a blob.
 ///
 /// The field is captured as a value in the view, not read inside the drawing
 /// closure: that is what makes the body depend on it, so a new field each
@@ -139,9 +141,12 @@ private struct RippleDotMatrix: View {
                     // moves the visible content the opposite way. The dots are
                     // content, so they take the negative.
                     let slope = field.slope(at: rest)
+                    let dent = field.dentSlope(at: rest)
+                    let dx = (slope.dx - dent.dx) * WaterTuning.strength + dent.dx * WaterTuning.dotStrength
+                    let dy = (slope.dy - dent.dy) * WaterTuning.strength + dent.dy * WaterTuning.dotStrength
                     let rect = CGRect(
-                        x: rest.x - slope.dx * WaterTuning.dotStrength - Self.dotDiameter / 2,
-                        y: rest.y - slope.dy * WaterTuning.dotStrength - Self.dotDiameter / 2,
+                        x: rest.x - dx - Self.dotDiameter / 2,
+                        y: rest.y - dy - Self.dotDiameter / 2,
                         width: Self.dotDiameter,
                         height: Self.dotDiameter
                     )

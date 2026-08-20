@@ -71,12 +71,18 @@ enum WaterTuning {
     /// Sample offset, in points, at full slope — how far the scene *under* the
     /// water shifts when refracted. Also bounds `maxSampleOffset`.
     static let strength: CGFloat = 24
-    /// How far a dot *on* the surface is carried sideways at full slope, in
-    /// points. Much smaller than `strength`: a point on a dented surface only
-    /// moves a little, while the picture seen through it shifts a lot. At the
-    /// scene's gain the dots near the rim were carried past the centre and
-    /// piled up into one white blob.
+    /// How far a dot is carried by the finger's own dent at full slope, in
+    /// points. The dots ride the *waves* at `strength`, like the scene; this
+    /// much smaller gain applies only to the dent the finger is holding. At
+    /// the scene's gain the dots near the rim were carried past the centre and
+    /// piled up into one white blob; at this one the finger just dimples the
+    /// mesh.
     static let dotStrength: CGFloat = 4
+    /// Seconds for the finger's dent, as the dots account for it, to fade
+    /// after a lift — roughly how long the real dent takes to rebound, so the
+    /// dots hand over from "dimpled by the finger" to "riding the rebound
+    /// ring" without a jump.
+    static let dentRebound: Double = 0.05
     /// Largest sample offset, in points, at which the surface counts as still.
     /// Half a point is a third of a pixel; cutting from that to the live
     /// viewfinder is invisible.
@@ -103,13 +109,20 @@ enum WaterTuning {
     /// Seconds for the trace to fade to half once the finger has moved on.
     /// This is the length of the glowing tail behind a drag, and of the fade
     /// once the lens has landed.
-    static let traceHalfLife: Double = 0.18
+    static let traceHalfLife: Double = 0.1
 }
 
 /// One frame of the surface as views read it: slope per cell for refraction,
 /// and the finger's trace per cell for the dot matrix. A value, so a view
 /// captures a consistent frame and reads nothing live while drawing.
 struct WaterField {
+    /// The dent the finger is imposing (or, just after a lift, its fading
+    /// ghost): the one part of the surface that is not a wave.
+    struct Dent {
+        var center: CGPoint
+        var depth: Float
+    }
+
     /// (∂h/∂x, ∂h/∂y) per cell, row-major, normalised to ±1 by
     /// `WaterTuning.maxSlope`.
     var slopes: [Float] = []
@@ -117,6 +130,7 @@ struct WaterField {
     var trace: [Float] = []
     var cellsWide = 0
     var cellsHigh = 0
+    var dent: Dent?
 
     /// The normalised slope at `point` — the same bilinear blend of the same
     /// array the shader samples, so anything moved by it tilts with the scene.
@@ -133,6 +147,19 @@ struct WaterField {
         let bottom = slope(xa, yb) + (slope(xb, yb) - slope(xa, yb)) * tx
         let g = top + (bottom - top) * ty
         return CGVector(dx: CGFloat(g.x), dy: CGFloat(g.y))
+    }
+
+    /// The slope of the finger's own dent at `point`, normalised like
+    /// `slope(at:)` — the analytic Gaussian the surface is being pulled
+    /// toward, so `slope(at:) - dentSlope(at:)` is the waves alone.
+    func dentSlope(at point: CGPoint) -> CGVector {
+        guard let dent else { return .zero }
+        let sigma = Float(WaterTuning.dentSigma / WaterTuning.cellSize)
+        let dx = Float((point.x - dent.center.x) / WaterTuning.cellSize)
+        let dy = Float((point.y - dent.center.y) / WaterTuning.cellSize)
+        let gain = dent.depth * exp(-(dx * dx + dy * dy) / (2 * sigma * sigma))
+            / (sigma * sigma) / WaterTuning.maxSlope
+        return CGVector(dx: CGFloat(dx * gain), dy: CGFloat(dy * gain))
     }
 
     /// The finger's trace at `point`, 0…1.
@@ -325,6 +352,7 @@ final class WaterSurface: NSObject {
         }
         field.slopes = slopes
         field.trace = trace
+        field.dent = nil
         isCalm = true
     }
 
@@ -337,6 +365,12 @@ final class WaterSurface: NSObject {
 
         if pressed {
             plane(elapsed: elapsed)
+            field.dent = WaterField.Dent(center: finger, depth: depth)
+        } else if let ghost = field.dent {
+            // The real dent is rebounding; let the dots' idea of it go at the
+            // same pace.
+            let depth = ghost.depth * Float(exp(-elapsed / WaterTuning.dentRebound))
+            field.dent = depth > 0.01 ? WaterField.Dent(center: ghost.center, depth: depth) : nil
         }
 
         accumulator = min(accumulator + elapsed, WaterTuning.maxFrameTime)
