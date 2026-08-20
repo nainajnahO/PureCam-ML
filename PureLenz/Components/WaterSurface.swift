@@ -65,25 +65,117 @@ enum WaterTuning {
     /// Hard cap on the tail after release, in seconds, whatever the surface is
     /// still doing.
     static let calmTimeout: Double = 3
+
+    // The finger's trace — what the dot matrix lights up.
+
+    /// How brightly the finger excites the surface around it: full at the
+    /// contact point, ~63% gone by this distance, halved every ~36pt. Judged
+    /// on device: 45 died too hard, 60 reached too far.
+    static let traceFalloff: CGFloat = 52
+    /// The exponential alone never reaches zero — and a few percent of a
+    /// two-stops-up white is still visible — so the last stretch is windowed
+    /// down to nothing between these two distances instead of cut.
+    static let traceWindowStart: CGFloat = 90
+    static let traceWindowEnd: CGFloat = 150
+    /// Seconds for the trace under a *stationary* finger to reach half
+    /// brightness. Fast on purpose: a quick lens can settle in well under a
+    /// second, and the glow only registers if it is at full strength for most
+    /// of that.
+    static let traceRiseHalfLife: Double = 0.05
+    /// Seconds for the trace to fade to half once the finger has moved on.
+    /// This is the length of the glowing tail behind a drag, and of the fade
+    /// once the lens has landed.
+    static let traceHalfLife: Double = 0.3
+}
+
+/// One frame of the surface as views read it: slope per cell for refraction,
+/// and the finger's trace per cell for the dot matrix. A value, so a view
+/// captures a consistent frame and reads nothing live while drawing.
+struct WaterField {
+    /// (∂h/∂x, ∂h/∂y) per cell, row-major, normalised to ±1 by
+    /// `WaterTuning.maxSlope`.
+    var slopes: [Float] = []
+    /// 0…1 per cell: how recently, and how closely, the finger was here.
+    var trace: [Float] = []
+    var cellsWide = 0
+    var cellsHigh = 0
+
+    /// The shader's sample offset at `point`, in points — the same bilinear
+    /// blend of the same array, so anything drawn with this moves with the
+    /// scene. Content (the dots) takes the negative: the shader moves where a
+    /// pixel is *sampled from*, which moves what is seen the other way.
+    func displacement(at point: CGPoint) -> CGVector {
+        guard cellsWide > 0 else { return .zero }
+        let (xa, xb, ya, yb, tx, ty) = cells(around: point)
+        func slope(_ x: Int, _ y: Int) -> SIMD2<Float> {
+            let i = (y * cellsWide + x) * 2
+            return SIMD2(slopes[i], slopes[i + 1])
+        }
+        let top = slope(xa, ya) + (slope(xb, ya) - slope(xa, ya)) * tx
+        let bottom = slope(xa, yb) + (slope(xb, yb) - slope(xa, yb)) * tx
+        let g = top + (bottom - top) * ty
+        return CGVector(
+            dx: CGFloat(g.x) * WaterTuning.strength,
+            dy: CGFloat(g.y) * WaterTuning.strength
+        )
+    }
+
+    /// The finger's trace at `point`, 0…1.
+    func glow(at point: CGPoint) -> Double {
+        guard cellsWide > 0 else { return 0 }
+        let (xa, xb, ya, yb, tx, ty) = cells(around: point)
+        func value(_ x: Int, _ y: Int) -> Float { trace[y * cellsWide + x] }
+        let top = value(xa, ya) + (value(xb, ya) - value(xa, ya)) * tx
+        let bottom = value(xa, yb) + (value(xb, yb) - value(xa, yb)) * tx
+        return Double(top + (bottom - top) * ty)
+    }
+
+    /// The four cells around `point` (cell `(x, y)` is centred at
+    /// `(x + 0.5, y + 0.5) * cellSize`) and the blend weights between them.
+    private func cells(around point: CGPoint)
+        -> (xa: Int, xb: Int, ya: Int, yb: Int, tx: Float, ty: Float) {
+        let fx = point.x / WaterTuning.cellSize - 0.5
+        let fy = point.y / WaterTuning.cellSize - 0.5
+        let x0 = Int(fx.rounded(.down))
+        let y0 = Int(fy.rounded(.down))
+        return (
+            xa: min(max(x0, 0), cellsWide - 1), xb: min(max(x0 + 1, 0), cellsWide - 1),
+            ya: min(max(y0, 0), cellsHigh - 1), yb: min(max(y0 + 1, 0), cellsHigh - 1),
+            tx: Float(fx - CGFloat(x0)), ty: Float(fy - CGFloat(y0))
+        )
+    }
 }
 
 /// The water the viewfinder is seen through: a height field over the view,
 /// simulated with the wave equation, that a finger presses a dent into.
 ///
-/// Nothing here emits ripples. The finger is a *boundary condition* — while
-/// pressed, the cells under it are pulled toward a small Gaussian dip each
-/// step — and the rest follows from the physics: the sudden dent on touch-down
-/// sends contact rings out, dragging it sheds a wake (bunched ahead, stretched
-/// behind, because the finger is chasing its own waves), two presses interfere,
-/// and lifting lets the dent rebound into one outgoing ring. Tap and drag are
-/// the same gesture with and without movement in between.
+/// Nothing here emits ripples. The finger is a *boundary condition* — while it
+/// is on the glass, the cells under it are pulled toward a small Gaussian dip
+/// each step — and the rest follows from the physics: the sudden dent on
+/// touch-down sends contact rings out, dragging it sheds a wake (bunched
+/// ahead, stretched behind, because the finger is chasing its own waves), two
+/// presses interfere, and lifting lets the dent rebound into one outgoing
+/// ring. Tap and drag are the same gesture with and without movement in
+/// between, and the finger is in the water exactly as long as it is on the
+/// screen — a held dent is perfectly still once its rings have left, which on
+/// device read as a freeze, so nothing is ever held waiting for the lens.
 ///
-/// The surface reports itself as *slope*, not height: water refracts by slope
-/// (`WaterRefraction.metal`), and the dot matrix moves by the same slope, so
-/// both read the one array and there is no second copy of the wave to keep in
-/// step. Simulation state is `@ObservationIgnored`; only what views draw from
-/// is tracked, and `slopes` is replaced once per display frame rather than
-/// written in place, which would notify per cell.
+/// Alongside the height the surface keeps the finger's *trace*: how recently
+/// it was over each cell, rising while it is there and fading once it has
+/// gone. That is what the dot matrix lights up — a stationary mesh over the
+/// whole view that glows only where the finger has been. The trace is the one
+/// thing that does wait for the lens: after a lift the patch under the lift
+/// point stays lit until `settle()`, marking where focus is being found, then
+/// fades like the rest. It is light, not water, so nothing has to hold still.
+/// The trace is kept here rather than in the dot view so the one display link
+/// drives both and both live on the same grid.
+///
+/// The surface publishes one `WaterField` per display frame — slope rather
+/// than height, since water refracts by slope (`WaterRefraction.metal`), and
+/// the dots move by the same slope, so there is no second copy of the wave to
+/// keep in step. Simulation state is `@ObservationIgnored`; the field is
+/// replaced once per frame rather than written in place, which would notify
+/// per cell.
 ///
 /// Inherits from NSObject so the display link can target an `@objc` selector
 /// (same pattern as `AutoExposureCoordinator`). The link exists only from a
@@ -91,26 +183,23 @@ enum WaterTuning {
 /// rest — the same contract as the frame pump that feeds the warp.
 @Observable
 final class WaterSurface: NSObject {
-    /// (∂h/∂x, ∂h/∂y) per cell, row-major, normalised to ±1 by
-    /// `WaterTuning.maxSlope`. Read by the shader and by `displacement(at:)`.
-    private(set) var slopes: [Float] = []
-    private(set) var cellsWide = 0
-    private(set) var cellsHigh = 0
-    /// True while nothing is happening: no press, and every cell below the
-    /// calm threshold. The warp is disabled and the copy handed back on this.
+    private(set) var field = WaterField()
+    /// True while nothing is happening: no press, every cell below the calm
+    /// threshold and the trace faded. The warp is disabled and the copy handed
+    /// back on this.
     private(set) var isCalm = true
-    /// True from touch-down until `release()` — which is the lens settling,
-    /// not the finger lifting (see `CameraViewModel.focusTouch`).
-    private(set) var pressed = false
-    /// Where the dent is: under the finger while it moves, then wherever it
-    /// lifted. Positions the dot matrix.
-    private(set) var contactPoint: CGPoint?
 
+    /// True while the finger is on the glass: the dent is being pressed.
+    @ObservationIgnored private var pressed = false
+    /// True from touch-down until the lens settles: the trace under `finger`
+    /// is being lit. Outlives `pressed` by however long focus takes.
+    @ObservationIgnored private var marking = false
     @ObservationIgnored private var height: [Float] = []
     @ObservationIgnored private var previous: [Float] = []
     /// Per-cell damping: base decay times the sponge's extra absorption.
     @ObservationIgnored private var damping: [Float] = []
-    @ObservationIgnored private var scratch: [Float] = []
+    @ObservationIgnored private var slopes: [Float] = []
+    @ObservationIgnored private var trace: [Float] = []
     /// Exact finger position in points — never snapped to a cell, so a slow
     /// drag moves the dent continuously rather than in 4pt hops.
     @ObservationIgnored private var finger = CGPoint.zero
@@ -127,6 +216,8 @@ final class WaterSurface: NSObject {
     private static let baseDamping = Float(
         pow(0.5, 1 / (WaterTuning.amplitudeHalfLife * WaterTuning.substepRate))
     )
+    /// Below this the trace is invisible even as a two-stops-up white.
+    private static let traceFloor: Float = 1 / 255
 
     // MARK: - Size
 
@@ -135,15 +226,14 @@ final class WaterSurface: NSObject {
     func resize(to size: CGSize) {
         let wide = Int((size.width / WaterTuning.cellSize).rounded(.up))
         let high = Int((size.height / WaterTuning.cellSize).rounded(.up))
-        guard wide > 2, high > 2, wide != cellsWide || high != cellsHigh else { return }
+        guard wide > 2, high > 2, wide != field.cellsWide || high != field.cellsHigh else { return }
 
         reset()
-        cellsWide = wide
-        cellsHigh = high
         height = [Float](repeating: 0, count: wide * high)
         previous = height
-        scratch = [Float](repeating: 0, count: wide * high * 2)
-        slopes = scratch
+        trace = height
+        slopes = [Float](repeating: 0, count: wide * high * 2)
+        field = WaterField(slopes: slopes, trace: trace, cellsWide: wide, cellsHigh: high)
 
         damping = height
         let sponge = Float(WaterTuning.spongeCells)
@@ -158,11 +248,12 @@ final class WaterSurface: NSObject {
 
     // MARK: - Finger
 
+    /// The finger lands: the dent forms and the trace under it starts to light.
     func press(at point: CGPoint) {
-        guard cellsWide > 0 else { return }
+        guard field.cellsWide > 0 else { return }
         finger = point
-        contactPoint = point
         pressed = true
+        marking = true
         guard isCalm else { return }
 
         isCalm = false
@@ -176,13 +267,21 @@ final class WaterSurface: NSObject {
     func move(to point: CGPoint) {
         guard pressed else { return }
         finger = point
-        contactPoint = point
     }
 
-    /// Let the surface go. Safe to call when nothing is pressed.
-    func release() {
+    /// The finger leaves the glass: the dent rebounds into its ring. The trace
+    /// stays lit where it lifted until `settle()`.
+    func lift() {
         guard pressed else { return }
         pressed = false
+        releasedAt = CACurrentMediaTime()
+    }
+
+    /// The lens has landed (or given up): stop lighting the lift point and let
+    /// the trace fade. Safe to call when nothing is marked.
+    func settle() {
+        guard marking else { return }
+        marking = false
         releasedAt = CACurrentMediaTime()
     }
 
@@ -190,52 +289,20 @@ final class WaterSurface: NSObject {
     /// where a surface left mid-wave would otherwise resume on return.
     func reset() {
         pressed = false
-        stop()
-    }
-
-    private func stop() {
+        marking = false
         link?.invalidate()
         link = nil
         for i in height.indices {
             height[i] = 0
             previous[i] = 0
+            trace[i] = 0
         }
-        for i in scratch.indices {
-            scratch[i] = 0
+        for i in slopes.indices {
+            slopes[i] = 0
         }
-        slopes = scratch
-        contactPoint = nil
+        field.slopes = slopes
+        field.trace = trace
         isCalm = true
-    }
-
-    // MARK: - Reading
-
-    /// The shader's sample offset at `point`, in points — the same bilinear
-    /// blend of the same array, so anything drawn with this moves with the
-    /// scene. Content (the dots) takes the negative: the shader moves where a
-    /// pixel is *sampled from*, which moves what is seen the other way.
-    func displacement(at point: CGPoint) -> CGVector {
-        guard cellsWide > 0 else { return .zero }
-        let fx = point.x / WaterTuning.cellSize - 0.5
-        let fy = point.y / WaterTuning.cellSize - 0.5
-        let x0 = Int(fx.rounded(.down))
-        let y0 = Int(fy.rounded(.down))
-        let tx = Float(fx - CGFloat(x0))
-        let ty = Float(fy - CGFloat(y0))
-        let xa = min(max(x0, 0), cellsWide - 1), xb = min(max(x0 + 1, 0), cellsWide - 1)
-        let ya = min(max(y0, 0), cellsHigh - 1), yb = min(max(y0 + 1, 0), cellsHigh - 1)
-
-        func slope(_ x: Int, _ y: Int) -> SIMD2<Float> {
-            let i = (y * cellsWide + x) * 2
-            return SIMD2(slopes[i], slopes[i + 1])
-        }
-        let top = slope(xa, ya) + (slope(xb, ya) - slope(xa, ya)) * tx
-        let bottom = slope(xa, yb) + (slope(xb, yb) - slope(xa, yb)) * tx
-        let g = top + (bottom - top) * ty
-        return CGVector(
-            dx: CGFloat(g.x) * WaterTuning.strength,
-            dy: CGFloat(g.y) * WaterTuning.strength
-        )
     }
 
     // MARK: - Simulation
@@ -252,12 +319,14 @@ final class WaterSurface: NSObject {
         }
 
         let peakOffset = writeSlopes()
-        slopes = scratch
+        let peakTrace = writeTrace(elapsed: elapsed)
+        field.slopes = slopes
+        field.trace = trace
 
-        let settled = peakOffset < WaterTuning.calmOffset
+        let still = (peakOffset < WaterTuning.calmOffset && peakTrace < Self.traceFloor)
             || CACurrentMediaTime() - releasedAt > WaterTuning.calmTimeout
-        if !pressed, settled {
-            stop()
+        if !pressed, !marking, still {
+            reset()
         }
     }
 
@@ -267,8 +336,8 @@ final class WaterSurface: NSObject {
     /// swapped, so the two arrays are reused without allocating. The border
     /// ring is never written and stays at zero, a fixed edge inside the sponge.
     private func step() {
-        let wide = cellsWide
-        let high = cellsHigh
+        let wide = field.cellsWide
+        let high = field.cellsHigh
         let c2 = Self.courant2
 
         height.withUnsafeBufferPointer { h in
@@ -283,26 +352,10 @@ final class WaterSurface: NSObject {
                     }
 
                     if pressed {
-                        let fx = Float(finger.x / WaterTuning.cellSize) - 0.5
-                        let fy = Float(finger.y / WaterTuning.cellSize) - 0.5
                         let sigma = Float(WaterTuning.dentSigma / WaterTuning.cellSize)
-                        let radius = 3 * sigma
-                        let x0 = max(1, Int((fx - radius).rounded(.down)))
-                        let x1 = min(wide - 2, Int((fx + radius).rounded(.up)))
-                        let y0 = max(1, Int((fy - radius).rounded(.down)))
-                        let y1 = min(high - 2, Int((fy + radius).rounded(.up)))
-                        if x0 <= x1, y0 <= y1 {
-                            for y in y0...y1 {
-                                for x in x0...x1 {
-                                    let dx = Float(x) - fx
-                                    let dy = Float(y) - fy
-                                    let d2 = dx * dx + dy * dy
-                                    guard d2 < radius * radius else { continue }
-                                    let target = -WaterTuning.dentDepth * exp(-d2 / (2 * sigma * sigma))
-                                    let i = y * wide + x
-                                    next[i] += (target - next[i]) * WaterTuning.grip
-                                }
-                            }
+                        forEachCell(within: 3 * sigma) { i, d2 in
+                            let target = -WaterTuning.dentDepth * exp(-d2 / (2 * sigma * sigma))
+                            next[i] += (target - next[i]) * WaterTuning.grip
                         }
                     }
                 }
@@ -311,17 +364,17 @@ final class WaterSurface: NSObject {
         swap(&height, &previous)
     }
 
-    /// Central-difference slope of every interior cell into `scratch`,
+    /// Central-difference slope of every interior cell into `slopes`,
     /// normalised and clamped to ±1. Returns the largest resulting sample
     /// offset, in points — the calm check, for free.
     private func writeSlopes() -> CGFloat {
-        let wide = cellsWide
-        let high = cellsHigh
+        let wide = field.cellsWide
+        let high = field.cellsHigh
         let scale = 0.5 / WaterTuning.maxSlope
         var peak: Float = 0
 
         height.withUnsafeBufferPointer { h in
-            scratch.withUnsafeMutableBufferPointer { s in
+            slopes.withUnsafeMutableBufferPointer { s in
                 for y in 1..<(high - 1) {
                     for x in 1..<(wide - 1) {
                         let i = y * wide + x
@@ -335,5 +388,63 @@ final class WaterSurface: NSObject {
             }
         }
         return CGFloat(peak) * WaterTuning.strength
+    }
+
+    /// Fade the whole trace by `elapsed`, then, while marking, re-light what is
+    /// under the finger (or where it lifted). Returns the brightest cell left.
+    private func writeTrace(elapsed: Double) -> Float {
+        let decay = Float(pow(0.5, elapsed / WaterTuning.traceHalfLife))
+        let rise = Float(1 - pow(0.5, elapsed / WaterTuning.traceRiseHalfLife))
+        let cell = Float(WaterTuning.cellSize)
+        let falloff = Float(WaterTuning.traceFalloff) / cell
+        let windowStart = Float(WaterTuning.traceWindowStart) / cell
+        let windowEnd = Float(WaterTuning.traceWindowEnd) / cell
+        var peak: Float = 0
+
+        trace.withUnsafeMutableBufferPointer { t in
+            for i in t.indices {
+                t[i] *= decay
+            }
+            if marking {
+                forEachCell(within: windowEnd) { i, d2 in
+                    let d = d2.squareRoot()
+                    let w = max(0, (d - windowStart) / (windowEnd - windowStart))
+                    let window = 1 - w * w * (3 - 2 * w)
+                    let target = exp(-d / falloff) * window
+                    if target > t[i] {
+                        t[i] += (target - t[i]) * rise
+                    }
+                }
+            }
+            for i in t.indices {
+                peak = max(peak, t[i])
+            }
+        }
+        return peak
+    }
+
+    /// Visit every interior cell within `radius` cells of the finger, with its
+    /// index and squared distance in cells.
+    private func forEachCell(within radius: Float, _ body: (_ index: Int, _ distance2: Float) -> Void) {
+        let wide = field.cellsWide
+        let high = field.cellsHigh
+        let fx = Float(finger.x / WaterTuning.cellSize) - 0.5
+        let fy = Float(finger.y / WaterTuning.cellSize) - 0.5
+        let x0 = max(1, Int((fx - radius).rounded(.down)))
+        let x1 = min(wide - 2, Int((fx + radius).rounded(.up)))
+        let y0 = max(1, Int((fy - radius).rounded(.down)))
+        let y1 = min(high - 2, Int((fy + radius).rounded(.up)))
+        guard x0 <= x1, y0 <= y1 else { return }
+
+        for y in y0...y1 {
+            for x in x0...x1 {
+                let dx = Float(x) - fx
+                let dy = Float(y) - fy
+                let d2 = dx * dx + dy * dy
+                if d2 < radius * radius {
+                    body(y * wide + x, d2)
+                }
+            }
+        }
     }
 }

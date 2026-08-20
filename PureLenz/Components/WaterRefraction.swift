@@ -40,19 +40,20 @@ extension View {
 /// draws the camera itself and distorts what it draws. See
 /// `CameraViewModel.focusTouch`.
 ///
-/// Only this modifier reads `surface.slopes`, which changes every display
+/// Only this modifier reads `surface.field`, which changes every display
 /// frame, so the per-frame re-evaluation stops here and never reaches the view
 /// that owns the copy.
 struct WaterRefraction: ViewModifier {
     let surface: WaterSurface
 
     func body(content: Content) -> some View {
+        let field = surface.field
         content
             .distortionEffect(
                 ShaderLibrary.waterRefraction(
-                    .floatArray(surface.slopes),
+                    .floatArray(field.slopes),
                     .boundingRect,
-                    .float2(Float(surface.cellsWide), Float(surface.cellsHigh)),
+                    .float2(Float(field.cellsWide), Float(field.cellsHigh)),
                     .float(Float(WaterTuning.cellSize)),
                     .float(Float(WaterTuning.strength))
                 ),
@@ -64,14 +65,8 @@ struct WaterRefraction: ViewModifier {
             // clamps extended-range colour to SDR, so the dots displace
             // themselves with the same surface instead (see `RippleDotMatrix`).
             .overlay {
-                if let contact = surface.contactPoint {
-                    RippleDotMatrix(surface: surface, center: contact)
-                        .position(contact)
-                        .opacity(surface.pressed ? 1 : 0)
-                        // Fast in: a quick lens can settle in well under a
-                        // second, and the extended-range glow only registers if
-                        // the dots are at full strength for most of that.
-                        .animation(.easeOut(duration: surface.pressed ? 0.15 : 0.32), value: surface.pressed)
+                if !surface.isCalm {
+                    RippleDotMatrix(field: field)
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
                 }
@@ -79,96 +74,83 @@ struct WaterRefraction: ViewModifier {
     }
 }
 
-/// The halftone sheen on the dent: a fine grid of HDR-white dots centred on
-/// the finger, fully lit over the dent and faded out past where it dies.
+/// The halftone sheen on the water: a fixed mesh of HDR-white dots over the
+/// whole viewfinder, lit only where the finger is or has just been, each dot
+/// carried by the wave under it.
+///
+/// The mesh does not follow the finger — water does not. What moves is the
+/// light: the surface keeps the finger's trace (`WaterField.trace`), rising
+/// under the contact and fading once it has passed, so a drag leaves a glowing
+/// tail and the lift point keeps its dots lit until the lens lands. Dots the trace
+/// has not reached are not drawn at all, which is what keeps an 8,000-dot mesh
+/// cheap: only the lit patch is ever filled.
 ///
 /// **Why the dots move themselves instead of sitting under the warp.** Running
 /// them through the shader would keep them in lockstep with the scene for
 /// free — but the distortion pass rasterizes what it wraps and clamps
 /// extended-range colour to SDR (verified on device: the same dots glow outside
 /// the warp and go flat inside it). Dots are discrete objects, so they don't
-/// need the shader: each frame this view asks the surface for the sample offset
-/// at every dot's rest position — the same array, the same bilinear blend the
-/// shader uses — and draws it already-moved, in a plain SwiftUI layer the
+/// need the shader: each frame this view asks the field for the sample offset
+/// at every lit dot's rest position — the same array, the same bilinear blend
+/// the shader uses — and draws it already-moved, in a plain SwiftUI layer the
 /// renderer keeps in extended range.
 ///
-/// Drawn inside a `TimelineView` because a `Canvas` closure does not reliably
-/// register what it reads as a dependency; the timeline redraws it every frame
-/// while the surface moves and not at all once it is calm.
+/// The field is captured as a value in the view, not read inside the drawing
+/// closure: that is what makes the body depend on it, so a new field each
+/// display frame means a new drawing each display frame.
 ///
-/// The edge fade is per-dot alpha rather than a `.mask` layer: every extra
+/// The glow is per-dot alpha rather than a `.mask` layer: every extra
 /// compositing layer is another place the extended-range white could get
 /// silently clamped to SDR.
 private struct RippleDotMatrix: View {
-    let surface: WaterSurface
-    /// The dent's position in the view the surface covers; dots sample the
-    /// surface relative to this.
-    let center: CGPoint
+    let field: WaterField
 
     /// Grid pitch, in points.
     private static let spacing: CGFloat = 7
     private static let dotDiameter: CGFloat = 2
-    /// Brightness decays exponentially from the centre; ~63% is gone by this
-    /// distance, halved every ~36pt. Judged on device: 45 died too hard, 60
-    /// reached too far.
-    private static let falloff: CGFloat = 52
-    /// Grid extent, and where the fade lands on exactly zero. The exponential
-    /// alone never reaches zero — and a few percent of a two-stops-up white is
-    /// still visible — so the last stretch is windowed down to nothing (see
-    /// `fade`) instead of cut.
-    private static let fadeEnd: CGFloat = 150
-    /// Where that closing window starts.
-    private static let windowStart: CGFloat = 90
     /// White pushed two stops past SDR white. `headroom(_:)` annotates the
     /// extended-range components so the renderer raises display headroom (or
     /// tone-maps) instead of clamping.
     private static let hdrWhite = Color(.sRGBLinear, red: 4, green: 4, blue: 4)
         .headroom(4)
+    /// Below this a dot is invisible even as a two-stops-up white.
+    private static let visible: Double = 1 / 255
 
     var body: some View {
-        TimelineView(.animation(paused: surface.isCalm)) { _ in
-            Canvas { context, size in
-                let local = CGPoint(x: size.width / 2, y: size.height / 2)
-                let steps = Int(Self.fadeEnd / Self.spacing)
+        Canvas { context, size in
+            let columns = Int(size.width / Self.spacing)
+            let rows = Int(size.height / Self.spacing)
 
-                for row in -steps...steps {
-                    for col in -steps...steps {
-                        let dx = CGFloat(col) * Self.spacing
-                        let dy = CGFloat(row) * Self.spacing
-                        // Fade uses the dot's rest position, so the fade circle
-                        // stays put while the dots move.
-                        let dist = hypot(dx, dy)
-                        guard dist < Self.fadeEnd else { continue }
+            for row in 0...rows {
+                for col in 0...columns {
+                    let rest = CGPoint(
+                        x: (CGFloat(col) + 0.5) * Self.spacing,
+                        y: (CGFloat(row) + 0.5) * Self.spacing
+                    )
+                    let glow = field.glow(at: rest)
+                    guard glow > Self.visible else { continue }
 
-                        let t = max(0, (dist - Self.windowStart) / (Self.fadeEnd - Self.windowStart))
-                        let window = 1 - t * t * (3 - 2 * t)
-                        let fade = exp(-dist / Self.falloff) * window
-
-                        // The shader moves where a pixel is *sampled from*,
-                        // which moves the visible content the opposite way.
-                        // The dots are content, so they take the negative.
-                        let offset = surface.displacement(
-                            at: CGPoint(x: center.x + dx, y: center.y + dy)
-                        )
-                        let rect = CGRect(
-                            x: local.x + dx - offset.dx - Self.dotDiameter / 2,
-                            y: local.y + dy - offset.dy - Self.dotDiameter / 2,
-                            width: Self.dotDiameter,
-                            height: Self.dotDiameter
-                        )
-                        // Fade via the context's compositing alpha, not
-                        // `Color.opacity`, so the colour value handed to the
-                        // renderer — extended components and headroom annotation —
-                        // is never rebuilt along the way.
-                        context.opacity = fade
-                        context.fill(
-                            Path(ellipseIn: rect),
-                            with: .color(Self.hdrWhite)
-                        )
-                    }
+                    // The shader moves where a pixel is *sampled from*, which
+                    // moves the visible content the opposite way. The dots are
+                    // content, so they take the negative.
+                    let offset = field.displacement(at: rest)
+                    let rect = CGRect(
+                        x: rest.x - offset.dx - Self.dotDiameter / 2,
+                        y: rest.y - offset.dy - Self.dotDiameter / 2,
+                        width: Self.dotDiameter,
+                        height: Self.dotDiameter
+                    )
+                    // Glow via the context's compositing alpha, not
+                    // `Color.opacity`, so the colour value handed to the
+                    // renderer — extended components and headroom annotation —
+                    // is never rebuilt along the way.
+                    context.opacity = glow
+                    context.fill(
+                        Path(ellipseIn: rect),
+                        with: .color(Self.hdrWhite)
+                    )
                 }
             }
         }
-        .frame(width: Self.fadeEnd * 2, height: Self.fadeEnd * 2)
     }
 }

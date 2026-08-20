@@ -72,8 +72,8 @@ class CameraViewModel {
     /// One per calm-to-calm session, however many presses happen inside it.
     private var rippleFramesTask: Task<Void, Never>?
 
-    /// Waits on the lens after a lift, then lets the water go. A new press
-    /// cancels it — the finger is back in.
+    /// Waits on the lens after a lift, then lets the lit patch at the lift
+    /// point fade. A new press cancels it — that press is the focus now.
     private var focusSettleTask: Task<Void, Never>?
     private var pressStart: ContinuousClock.Instant = .now
 
@@ -83,10 +83,10 @@ class CameraViewModel {
     /// visibly softer than the viewfinder. This is the effect's main cost dial.
     private static let rippleFrameSize: CGFloat = 2400
 
-    /// Shortest a press may hold the dent before the lens is allowed to release
-    /// it, measured from touch-down. A lens that was already right can report
-    /// back almost immediately; a dent that appeared and rebounded within a
-    /// few frames would register as a flinch rather than a touch.
+    /// Shortest the lift point stays lit, measured from touch-down. A lens that
+    /// was already right can report back almost immediately; a glow that came
+    /// and went within a few frames would register as a flicker rather than an
+    /// answer.
     private static let minimumHold: Duration = .seconds(0.3)
 
     // MARK: - Initialization
@@ -202,11 +202,10 @@ class CameraViewModel {
     // MARK: - Focus
 
     /// A finger on the viewfinder, phase by phase: it presses the water on
-    /// touch-down, drags the dent while it moves, and on lift focuses the lens
-    /// there. The dent is *held* until the lens settles — the finger stays in
-    /// the water while the lens works, and leaves when it lands — so tap and
-    /// drag share one story, and the wait for focus is shown by the same dent
-    /// rather than a second animation.
+    /// touch-down, drags the dent while it moves, and on lift lets the water
+    /// go and focuses the lens there. The finger is in the water exactly as
+    /// long as it is on the glass; only the lit patch at the lift point waits
+    /// for the lens, and `settle()` lets it fade once focus lands.
     ///
     /// Both points come from `CameraPreview`, which is the only place that can
     /// convert between them correctly — `viewPoint` is where the water is
@@ -216,7 +215,7 @@ class CameraViewModel {
     func focusTouch(_ phase: FocusTouchPhase, viewPoint: CGPoint, devicePoint: CGPoint) {
         switch phase {
         case .began:
-            // A new press supersedes a pending release: the finger is back in.
+            // A new press supersedes a pending settle: this is the focus now.
             focusSettleTask?.cancel()
             pressStart = .now
             let wasCalm = water.isCalm
@@ -231,23 +230,27 @@ class CameraViewModel {
             water.move(to: viewPoint)
 
         case .ended:
+            water.lift()
             cameraService.focus(at: devicePoint)
             hapticManager.impact(.light)
             focusSettleTask = Task { [weak self] in
                 guard let self else { return }
                 // Bounded by `awaitFocusSettled`'s own timeout, so a lens that
-                // never reports still lets go.
+                // never reports still lets the glow fade.
                 await cameraService.awaitFocusSettled()
-                let held = ContinuousClock.now - pressStart
-                if held < Self.minimumHold {
-                    try? await Task.sleep(for: Self.minimumHold - held)
+                let lit = ContinuousClock.now - pressStart
+                if lit < Self.minimumHold {
+                    try? await Task.sleep(for: Self.minimumHold - lit)
                 }
                 guard !Task.isCancelled else { return }
-                water.release()
+                water.settle()
             }
 
         case .cancelled:
-            water.release()
+            // Nothing was chosen: the water lets go and nothing waits for a
+            // lens that was never asked.
+            water.lift()
+            water.settle()
         }
     }
 
