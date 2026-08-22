@@ -81,9 +81,10 @@ struct WaterRefraction: ViewModifier {
 /// The mesh does not follow the finger — water does not. What moves is the
 /// light: the surface keeps the finger's trace (`WaterField.trace`), rising
 /// under the contact and fading once it has passed, so a drag leaves a glowing
-/// tail and the lift point keeps its dots lit until the lens lands. Dots the trace
-/// has not reached are not drawn at all, which is what keeps an 8,000-dot mesh
-/// cheap: only the lit patch is ever filled.
+/// tail and the lift point keeps its dots lit until the lens lands — breathing
+/// in brightness (`WaterField.breath`) if the lens is taking a while. Dots the
+/// trace has not reached are not drawn at all, which is what keeps an
+/// 8,000-dot mesh cheap: only the lit patch is ever filled.
 ///
 /// **Why the dots move themselves instead of sitting under the warp.** Running
 /// them through the shader would keep them in lockstep with the scene for
@@ -153,8 +154,11 @@ private struct RippleDotMatrix: View {
                     // Glow via the context's compositing alpha, not
                     // `Color.opacity`, so the colour value handed to the
                     // renderer — extended components and headroom annotation —
-                    // is never rebuilt along the way.
-                    context.opacity = glow
+                    // is never rebuilt along the way. The breath (the whole
+                    // patch dimming while the lens is slow) is folded in here
+                    // per dot for the same reason, rather than as `.opacity`
+                    // on the matrix, which would be one more layer to clamp.
+                    context.opacity = glow * field.breath
                     context.fill(
                         Path(ellipseIn: rect),
                         with: .color(Self.hdrWhite)

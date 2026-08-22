@@ -110,6 +110,21 @@ enum WaterTuning {
     /// This is the length of the glowing tail behind a drag, and of the fade
     /// once the lens has landed.
     static let traceHalfLife: Double = 0.1
+
+    // Breathing — what the lit patch does while the lens is slow.
+
+    /// Seconds after a lift before the lit dots start to breathe. A lens that
+    /// settles quickly (`CameraViewModel.minimumHold` is 0.3s) never reaches
+    /// this, so a normal tap stays a steady glow; the breathing itself is the
+    /// sign that focus is taking a while. First guess, to be judged on device.
+    static let breatheDelay: Double = 0.4
+    /// Seconds per breath, full to dim and back. Kept short enough that one
+    /// whole dip fits before `CameraService.awaitFocusSettled`'s 1.5s timeout
+    /// lets the glow fade regardless of the lens.
+    static let breathePeriod: Double = 0.8
+    /// How far the patch dims at the bottom of a breath, as a fraction of full
+    /// brightness. Never all the way: dark reads as "done".
+    static let breatheDepth: Double = 0.5
 }
 
 /// One frame of the surface as views read it: slope per cell for refraction,
@@ -128,6 +143,11 @@ struct WaterField {
     var slopes: [Float] = []
     /// 0…1 per cell: how recently, and how closely, the finger was here.
     var trace: [Float] = []
+    /// 0…1, one value for the whole patch: how bright the trace is drawn this
+    /// frame. Full until the lens has been slow for a while, then breathing
+    /// (see `WaterTuning.breatheDelay`). The trace says where the light is;
+    /// this says how much of it there is.
+    var breath: Double = 1
     var cellsWide = 0
     var cellsHigh = 0
     var dent: Dent?
@@ -254,6 +274,10 @@ final class WaterSurface: NSObject {
     @ObservationIgnored private var accumulator: Double = 0
     @ObservationIgnored private var lastTimestamp: CFTimeInterval?
     @ObservationIgnored private var releasedAt: CFTimeInterval = 0
+    /// When the finger last left the glass — the clock the breathing runs on.
+    /// Separate from `releasedAt`, which `settle()` restamps; restarting the
+    /// breath there would make the brightness jump.
+    @ObservationIgnored private var liftedAt: CFTimeInterval = 0
     @ObservationIgnored private var link: CADisplayLink?
 
     private static let substepDuration = 1 / WaterTuning.substepRate
@@ -325,6 +349,7 @@ final class WaterSurface: NSObject {
         guard pressed else { return }
         pressed = false
         releasedAt = CACurrentMediaTime()
+        liftedAt = releasedAt
     }
 
     /// The lens has landed (or given up): stop lighting the lift point and let
@@ -352,6 +377,7 @@ final class WaterSurface: NSObject {
         }
         field.slopes = slopes
         field.trace = trace
+        field.breath = 1
         field.dent = nil
         isCalm = true
     }
@@ -383,6 +409,7 @@ final class WaterSurface: NSObject {
         let peakTrace = writeTrace(elapsed: elapsed)
         field.slopes = slopes
         field.trace = trace
+        field.breath = pressed ? 1 : breath(sinceLift: link.timestamp - liftedAt)
 
         let still = (peakOffset < WaterTuning.calmOffset && peakTrace < Self.traceFloor)
             || CACurrentMediaTime() - releasedAt > WaterTuning.calmTimeout
@@ -405,6 +432,19 @@ final class WaterSurface: NSObject {
 
         let planing = Float(min(fingerSpeed / WaterTuning.planingSpeed, 1))
         depth = WaterTuning.dentDepth + (WaterTuning.planedDepth - WaterTuning.dentDepth) * planing
+    }
+
+    /// Brightness of the lit patch `elapsed` seconds after the finger left:
+    /// full until `WaterTuning.breatheDelay`, then a raised cosine that leaves
+    /// full brightness without a step and dips by `breatheDepth` once per
+    /// `breathePeriod`. A pure function of time, so it keeps running through
+    /// `settle()` rather than snapping back to full — the trace fades in a few
+    /// tenths of a second anyway, and a snap would read as a flash.
+    private func breath(sinceLift elapsed: Double) -> Double {
+        let breathing = elapsed - WaterTuning.breatheDelay
+        guard breathing > 0 else { return 1 }
+        let phase = 2 * Double.pi * breathing / WaterTuning.breathePeriod
+        return 1 - WaterTuning.breatheDepth * (1 - cos(phase)) / 2
     }
 
     /// One step of the wave equation, then the finger.
