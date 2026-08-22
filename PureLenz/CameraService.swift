@@ -369,6 +369,13 @@ class CameraService: NSObject {
         }
     }
 
+    /// How long a shutter press waits for a tapped focus scan before firing
+    /// anyway. Sized from the log on an iPhone Air: scans land in two clusters,
+    /// ~200 ms and ~480 ms (longest seen 595 ms), so 300 ms cut off half of
+    /// them. 600 ms clears both; a press with the lens already settled — the
+    /// common case — never waits at all.
+    static let shutterFocusSettleTimeoutSeconds: TimeInterval = 0.6
+
     /// Resolves when the scan started by `focus(at:)` has settled.
     ///
     /// AVFoundation has no completion callback for autofocus. The one handler it
@@ -381,12 +388,22 @@ class CameraService: NSObject {
     /// lens moving" flag and may never turn on at all when the lens is already
     /// where it needs to be.
     ///
-    /// There is deliberately no timeout: a single-shot scan always ends, at a
-    /// pace only the camera knows, and the caller wants the real answer however
-    /// long it takes. The one way a scan could fail to end is by never starting
-    /// — a device that would not take the mode — and that case resolves at once,
-    /// because the mode is then still whatever it was before.
-    func awaitFocusSettled() async {
+    /// A single-shot scan always ends, at a pace only the camera knows, so by
+    /// default there is no timeout: the ripple that waits on this wants the real
+    /// answer however long it takes. The one way a scan could fail to end is by
+    /// never starting — a device that would not take the mode — and that case
+    /// resolves at once, because the mode is then still whatever it was before.
+    ///
+    /// The shutter is the caller that cannot wait indefinitely: a photo that is
+    /// a fraction late still exists, one that never fires does not. It passes a
+    /// `timeout`, after which this resolves regardless of the lens.
+    ///
+    /// With no tapped scan in flight — continuous AF, or a tap that already
+    /// settled — this resolves immediately, so it costs the common case nothing.
+    ///
+    /// - Parameter timeout: Seconds to wait before resolving anyway. `nil` waits
+    ///   for the scan, however long it takes.
+    func awaitFocusSettled(timeout: TimeInterval? = nil) async {
         // Ordered behind the `focus(at:)` this is waiting on. `sessionQueue` is
         // serial, so by the time this lands the new scan has been requested and
         // `focusMode` is no longer whatever the *previous* tap left locked.
@@ -398,6 +415,7 @@ class CameraService: NSObject {
         let device = input.device
         let id = UUID()
         var observation: NSKeyValueObservation?
+        let start = ContinuousClock.now
 
         await withCheckedContinuation { continuation in
             sessionQueue.async { [weak self] in
@@ -408,9 +426,34 @@ class CameraService: NSObject {
                 guard device.focusMode != .autoFocus else { return }
                 self?.resolveFocusSettle(id)
             }
+
+            // Timeout fallback, on the same serial queue as the observation's
+            // resolve, so the continuation is resumed exactly once.
+            if let timeout {
+                sessionQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                    guard let self,
+                          let index = self.pendingFocusSettles.firstIndex(where: { $0.id == id }) else { return }
+                    // Notice, not debug: the lens was still racking when the
+                    // caller stopped waiting, which is worth seeing in field logs.
+                    Logger.camera.notice("Focus did not settle within \(timeout, format: .fixed(precision: 2))s - continuing anyway")
+                    self.pendingFocusSettles.remove(at: index).continuation.resume()
+                }
+            }
         }
 
         observation?.invalidate()
+
+        // The ripple's waiter (no timeout) sees the scan through, so its time
+        // is the real scan length — the number the shutter's cap is sized
+        // against. The shutter's own time shows what a press actually paid.
+        let elapsed = start.duration(to: .now).formatted(
+            .units(allowed: [.milliseconds], width: .abbreviated, fractionalPart: .show(length: 1))
+        )
+        if timeout == nil {
+            Logger.camera.info("Focus settled in \(elapsed)")
+        } else {
+            Logger.camera.info("Shutter waited \(elapsed) for focus")
+        }
     }
 
     /// Resume one waiter, if it is still waiting. Hops to `sessionQueue` so the
