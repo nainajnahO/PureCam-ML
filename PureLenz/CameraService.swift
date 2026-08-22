@@ -370,9 +370,11 @@ class CameraService: NSObject {
     }
 
     /// How long a shutter press waits for a tapped focus scan before firing
-    /// anyway. Long enough for a typical scan to land, short enough that a
-    /// press never feels dropped. A feel number — judged on device.
-    static let shutterFocusSettleTimeoutSeconds: TimeInterval = 0.3
+    /// anyway. Sized from the log on an iPhone Air: scans land in two clusters,
+    /// ~200 ms and ~480 ms (longest seen 595 ms), so 300 ms cut off half of
+    /// them. 600 ms clears both; a press with the lens already settled — the
+    /// common case — never waits at all.
+    static let shutterFocusSettleTimeoutSeconds: TimeInterval = 0.6
 
     /// Resolves when the scan started by `focus(at:)` has settled.
     ///
@@ -413,6 +415,7 @@ class CameraService: NSObject {
         let device = input.device
         let id = UUID()
         var observation: NSKeyValueObservation?
+        let start = ContinuousClock.now
 
         await withCheckedContinuation { continuation in
             sessionQueue.async { [weak self] in
@@ -439,6 +442,18 @@ class CameraService: NSObject {
         }
 
         observation?.invalidate()
+
+        // The ripple's waiter (no timeout) sees the scan through, so its time
+        // is the real scan length — the number the shutter's cap is sized
+        // against. The shutter's own time shows what a press actually paid.
+        let elapsed = start.duration(to: .now).formatted(
+            .units(allowed: [.milliseconds], width: .abbreviated, fractionalPart: .show(length: 1))
+        )
+        if timeout == nil {
+            Logger.camera.info("Focus settled in \(elapsed)")
+        } else {
+            Logger.camera.info("Shutter waited \(elapsed) for focus")
+        }
     }
 
     /// Resume one waiter, if it is still waiting. Hops to `sessionQueue` so the
