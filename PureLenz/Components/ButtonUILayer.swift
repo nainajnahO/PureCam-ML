@@ -62,9 +62,21 @@ struct ButtonUILayer: View {
                     shutterRingRadius: sizes.shutterRingRadius,
                     isoZoneRadius: sizes.isoZoneRadius,
                     onCapture: {
-                        cameraVM.triggerCaptureFlash()
-                        autoExposure.recordTrainingSampleIfNeeded()
-                        cameraService.capturePhoto()
+                        // The press is acknowledged at once (the haptic in
+                        // `CaptureButton`); the shutter itself holds until a
+                        // tapped focus scan has landed, capped so a press is
+                        // never dropped. Flash and training frame go with the
+                        // shutter, so both mark the frame actually captured.
+                        // Preview captures are deliberately not gated: nothing
+                        // is saved, and tapping again is free.
+                        Task {
+                            await cameraService.awaitFocusSettled(
+                                timeout: CameraService.shutterFocusSettleTimeoutSeconds
+                            )
+                            cameraVM.triggerCaptureFlash()
+                            autoExposure.recordTrainingSampleIfNeeded()
+                            cameraService.capturePhoto()
+                        }
                     }
                 )
                 .position(x: positions.captureX, y: positions.buttonY)
