@@ -17,8 +17,16 @@
 import SwiftUI
 import AVFoundation
 
+/// One finger's progress across the viewfinder, from touch-down to lift.
+enum FocusTouchPhase {
+    case began, moved, ended
+    /// The system took the touch (an incoming call, the app going inactive).
+    /// Nothing was chosen, so nothing should be focused.
+    case cancelled
+}
+
 struct CameraPreview: UIViewRepresentable {
-    class VideoPreviewView: UIView, UIGestureRecognizerDelegate {
+    class VideoPreviewView: UIView {
         override class var layerClass: AnyClass {
             AVCaptureVideoPreviewLayer.self
         }
@@ -34,21 +42,48 @@ struct CameraPreview: UIViewRepresentable {
         var onCropFraction: ((CGFloat) -> Void)?
         private var reportedCropFraction: CGFloat?
 
-        /// Reports a viewfinder tap as both the point in this view's own
-        /// coordinates (where the reticle is drawn) and the normalized sensor
-        /// point it maps to (what focus needs).
+        /// Reports each phase of a finger on the viewfinder as both the point
+        /// in this view's own coordinates (where the water is pressed) and the
+        /// normalized sensor point it maps to (what focus needs).
         ///
         /// The conversion has to happen here, because only the layer knows the
         /// two things that make a screen fraction *not* a sensor fraction:
         /// `.resizeAspectFill` crops the short axis, and the connection is
         /// rotated a fixed 90°, which swaps the axes. `captureDevicePointConverted`
         /// accounts for both — dividing by the view's width and height does not.
-        var onFocusTap: ((_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)?
+        var onFocusTouch: ((FocusTouchPhase, _ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)?
 
-        @objc func handleFocusTap(_ recognizer: UITapGestureRecognizer) {
-            let viewPoint = recognizer.location(in: self)
+        // Raw touch events rather than a gesture recognizer: the water needs
+        // touch-down, not touch-up, and these four map one-to-one onto the
+        // phases with nothing to configure. A touch only arrives here at all
+        // if it hit-tested to this view, so the controls layered above the
+        // viewfinder (capture button, preview button, framing indicator) are
+        // excluded by construction.
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            report(.began, touches)
+        }
+
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            report(.moved, touches)
+        }
+
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            report(.ended, touches)
+        }
+
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            report(.cancelled, touches)
+        }
+
+        private func report(_ phase: FocusTouchPhase, _ touches: Set<UITouch>) {
+            guard let touch = touches.first else { return }
+            var viewPoint = touch.location(in: self)
+            // A drag keeps reporting after the finger leaves the view, and a
+            // lift out there would hand focus a sensor point outside 0…1.
+            viewPoint.x = min(max(viewPoint.x, 0), bounds.width)
+            viewPoint.y = min(max(viewPoint.y, 0), bounds.height)
             let devicePoint = videoPreviewLayer.captureDevicePointConverted(fromLayerPoint: viewPoint)
-            onFocusTap?(viewPoint, devicePoint)
+            onFocusTouch?(phase, viewPoint, devicePoint)
         }
 
         override func layoutSubviews() {
@@ -75,23 +110,13 @@ struct CameraPreview: UIViewRepresentable {
                 self?.onCropFraction?(fraction)
             }
         }
-
-        /// Only take taps that land on the viewfinder itself. The controls above
-        /// it (capture button, preview button, framing indicator) are separate
-        /// views, so a tap on one of those hit-tests to that view and must not
-        /// also focus the lens.
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch
-        ) -> Bool {
-            touch.view === self
-        }
     }
 
     let session: AVCaptureSession
     /// Surfaces the preview's true short-axis crop fraction (see `VideoPreviewView`).
     var onCropFraction: ((CGFloat) -> Void)?
-    /// Surfaces a viewfinder tap, already converted to a sensor point (see `VideoPreviewView`).
-    var onFocusTap: ((_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)?
+    /// Surfaces a finger on the viewfinder, already converted to a sensor point (see `VideoPreviewView`).
+    var onFocusTouch: ((FocusTouchPhase, _ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)?
 
     func makeUIView(context: Context) -> VideoPreviewView {
         let view = VideoPreviewView()
@@ -99,15 +124,7 @@ struct CameraPreview: UIViewRepresentable {
         view.videoPreviewLayer.session = session
         view.videoPreviewLayer.videoGravity = .resizeAspectFill
         view.onCropFraction = onCropFraction
-        view.onFocusTap = onFocusTap
-
-        // Targets the view rather than a Coordinator because the view is what
-        // holds the layer the conversion needs.
-        let tap = UITapGestureRecognizer(
-            target: view, action: #selector(VideoPreviewView.handleFocusTap(_:))
-        )
-        tap.delegate = view
-        view.addGestureRecognizer(tap)
+        view.onFocusTouch = onFocusTouch
 
         updateRotation(for: view.videoPreviewLayer)
 
@@ -116,7 +133,7 @@ struct CameraPreview: UIViewRepresentable {
 
     func updateUIView(_ uiView: VideoPreviewView, context: Context) {
         uiView.onCropFraction = onCropFraction
-        uiView.onFocusTap = onFocusTap
+        uiView.onFocusTouch = onFocusTouch
         updateRotation(for: uiView.videoPreviewLayer)
     }
 
@@ -129,8 +146,8 @@ struct CameraPreview: UIViewRepresentable {
         // AVCaptureDevice.RotationCoordinator in CameraService.
         let angle: CGFloat = 90
 
-        // Only touch the connection when the angle actually differs. While a
-        // focus ripple runs, a new copied frame arrives ~30×/second and each one
+        // Only touch the connection when the angle actually differs. While the
+        // water moves, a new copied frame arrives ~30×/second and each one
         // re-runs `updateUIView`; re-setting an unchanged rotation on the live
         // capture connection that often is work the viewfinder should not pay.
         guard layer.connection?.videoRotationAngle != angle else { return }

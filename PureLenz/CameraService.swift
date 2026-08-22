@@ -369,19 +369,24 @@ class CameraService: NSObject {
         }
     }
 
-    /// Resolves when the scan started by `focus(at:)` has settled, or after
-    /// `timeout` — whichever comes first.
+    /// Resolves when the scan started by `focus(at:)` has settled.
     ///
     /// AVFoundation has no completion callback for autofocus. The one handler it
     /// offers, `setFocusModeLockedWithLensPosition(_:completionHandler:)`, is for
     /// driving the lens to an explicit position, not for a scan. What the device
     /// does publish is state: `.autoFocus` means "scan once, then set `focusMode`
     /// to `.locked` yourself", and that transition is KVO-observable. So the mode
-    /// arriving at `.locked` *is* the completion signal for the request this app
+    /// *leaving* `.autoFocus` is the completion signal for the request this app
     /// makes — more precise than `isAdjustingFocus`, which is a general "is the
     /// lens moving" flag and may never turn on at all when the lens is already
     /// where it needs to be.
-    func awaitFocusSettled(timeout: TimeInterval = 1.5) async {
+    ///
+    /// There is deliberately no timeout: a single-shot scan always ends, at a
+    /// pace only the camera knows, and the caller wants the real answer however
+    /// long it takes. The one way a scan could fail to end is by never starting
+    /// — a device that would not take the mode — and that case resolves at once,
+    /// because the mode is then still whatever it was before.
+    func awaitFocusSettled() async {
         // Ordered behind the `focus(at:)` this is waiting on. `sessionQueue` is
         // serial, so by the time this lands the new scan has been requested and
         // `focusMode` is no longer whatever the *previous* tap left locked.
@@ -400,14 +405,7 @@ class CameraService: NSObject {
             }
 
             observation = device.observe(\.focusMode, options: [.initial, .new]) { [weak self] device, _ in
-                guard device.focusMode == .locked else { return }
-                self?.resolveFocusSettle(id)
-            }
-
-            // The lens can also simply never settle — a blank wall, or a mode the
-            // device would not take. Nothing may then be waiting on the other end
-            // of this, so the timeout is what stops a ripple hanging open.
-            sessionQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard device.focusMode != .autoFocus else { return }
                 self?.resolveFocusSettle(id)
             }
         }
