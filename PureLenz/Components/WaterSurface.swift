@@ -111,20 +111,16 @@ enum WaterTuning {
     /// once the lens has landed.
     static let traceHalfLife: Double = 0.1
 
-    // Breathing — what the lit patch does while the lens is slow.
+    // Breathing — what the lit patch does while the lens works.
 
-    /// Seconds after a lift before the lit dots start to breathe. A lens that
-    /// settles quickly (`CameraViewModel.minimumHold` is 0.3s) never reaches
-    /// this, so a normal tap stays a steady glow; the breathing itself is the
-    /// sign that focus is taking a while. First guess, to be judged on device.
-    static let breatheDelay: Double = 0.4
-    /// Seconds per breath, full to dim and back. Kept short enough that one
-    /// whole dip fits before `CameraService.awaitFocusSettled`'s 1.5s timeout
-    /// lets the glow fade regardless of the lens.
-    static let breathePeriod: Double = 0.8
+    /// Seconds per breath, full to dim and back, starting the moment the finger
+    /// lifts. The breath is the unit the glow is measured in: `settle()` lets
+    /// the patch breathe out before fading, so a quick focus shows one dip and
+    /// a hunting lens shows however many it took.
+    static let breathePeriod: Double = 1.6
     /// How far the patch dims at the bottom of a breath, as a fraction of full
     /// brightness. Never all the way: dark reads as "done".
-    static let breatheDepth: Double = 0.5
+    static let breatheDepth: Double = 0.75
 }
 
 /// One frame of the surface as views read it: slope per cell for refraction,
@@ -144,9 +140,9 @@ struct WaterField {
     /// 0…1 per cell: how recently, and how closely, the finger was here.
     var trace: [Float] = []
     /// 0…1, one value for the whole patch: how bright the trace is drawn this
-    /// frame. Full until the lens has been slow for a while, then breathing
-    /// (see `WaterTuning.breatheDelay`). The trace says where the light is;
-    /// this says how much of it there is.
+    /// frame — full under the finger, breathing once it has lifted (see
+    /// `WaterTuning.breathePeriod`). The trace says where the light is; this
+    /// says how much of it there is.
     var breath: Double = 1
     var cellsWide = 0
     var cellsHigh = 0
@@ -227,8 +223,9 @@ struct WaterField {
 /// gone. That is what the dot matrix lights up — a stationary mesh over the
 /// whole view that glows only where the finger has been. The trace is the one
 /// thing that does wait for the lens: after a lift the patch under the lift
-/// point stays lit until `settle()`, marking where focus is being found, then
-/// fades like the rest. It is light, not water, so nothing has to hold still.
+/// point stays lit, breathing, until `settle()` — and then until the end of
+/// that breath — marking where focus is being found, then fades like the
+/// rest. It is light, not water, so nothing has to hold still.
 /// The trace is kept here rather than in the dot view so the one display link
 /// drives both and both live on the same grid.
 ///
@@ -275,9 +272,12 @@ final class WaterSurface: NSObject {
     @ObservationIgnored private var lastTimestamp: CFTimeInterval?
     @ObservationIgnored private var releasedAt: CFTimeInterval = 0
     /// When the finger last left the glass — the clock the breathing runs on.
-    /// Separate from `releasedAt`, which `settle()` restamps; restarting the
-    /// breath there would make the brightness jump.
+    /// Separate from `releasedAt`, which is restamped when the marking ends;
+    /// restarting the breath there would make the brightness jump.
     @ObservationIgnored private var liftedAt: CFTimeInterval = 0
+    /// When the marking will end: the bottom of the breath that was under way
+    /// when `settle()` was called. Nil while nothing has asked to settle.
+    @ObservationIgnored private var settleAt: CFTimeInterval?
     @ObservationIgnored private var link: CADisplayLink?
 
     private static let substepDuration = 1 / WaterTuning.substepRate
@@ -328,6 +328,9 @@ final class WaterSurface: NSObject {
         fingerSpeed = 0
         pressed = true
         marking = true
+        // A new press is the focus now; a settle still pending from the last
+        // one must not end this patch mid-breath.
+        settleAt = nil
         guard isCalm else { return }
 
         isCalm = false
@@ -352,12 +355,19 @@ final class WaterSurface: NSObject {
         liftedAt = releasedAt
     }
 
-    /// The lens has landed (or given up): stop lighting the lift point and let
-    /// the trace fade. Safe to call when nothing is marked.
+    /// The lens has landed: let the lit patch breathe out, then stop lighting
+    /// the lift point and let the trace fade. The marking ends at the *bottom*
+    /// of the breath under way, so the glow always leaves on an exhale — one
+    /// dip for a quick focus, more for a lens that hunted. Ending at the top
+    /// was tried first: the patch came back to full and then cut out, and that
+    /// second brightening read as one breath too many. Safe to call when
+    /// nothing is marked.
     func settle() {
-        guard marking else { return }
-        marking = false
-        releasedAt = CACurrentMediaTime()
+        guard marking, settleAt == nil else { return }
+        let breathed = (CACurrentMediaTime() - liftedAt) / WaterTuning.breathePeriod
+        // Troughs sit at (k + ½) periods; take the first one not yet passed.
+        let trough = (breathed - 0.5).rounded(.up) + 0.5
+        settleAt = liftedAt + trough * WaterTuning.breathePeriod
     }
 
     /// Flatten everything and stop, immediately — for leaving the foreground,
@@ -365,6 +375,7 @@ final class WaterSurface: NSObject {
     func reset() {
         pressed = false
         marking = false
+        settleAt = nil
         link?.invalidate()
         link = nil
         for i in height.indices {
@@ -411,6 +422,14 @@ final class WaterSurface: NSObject {
         field.trace = trace
         field.breath = pressed ? 1 : breath(sinceLift: link.timestamp - liftedAt)
 
+        if let settleAt, !pressed, link.timestamp >= settleAt {
+            // Bottom of the last breath: the marking ends here, and the tail's
+            // clock restarts so the fade is not cut short by `calmTimeout`.
+            marking = false
+            self.settleAt = nil
+            releasedAt = link.timestamp
+        }
+
         let still = (peakOffset < WaterTuning.calmOffset && peakTrace < Self.traceFloor)
             || CACurrentMediaTime() - releasedAt > WaterTuning.calmTimeout
         if !pressed, !marking, still {
@@ -434,16 +453,14 @@ final class WaterSurface: NSObject {
         depth = WaterTuning.dentDepth + (WaterTuning.planedDepth - WaterTuning.dentDepth) * planing
     }
 
-    /// Brightness of the lit patch `elapsed` seconds after the finger left:
-    /// full until `WaterTuning.breatheDelay`, then a raised cosine that leaves
-    /// full brightness without a step and dips by `breatheDepth` once per
-    /// `breathePeriod`. A pure function of time, so it keeps running through
-    /// `settle()` rather than snapping back to full — the trace fades in a few
-    /// tenths of a second anyway, and a snap would read as a flash.
+    /// Brightness of the lit patch `elapsed` seconds after the finger left: a
+    /// raised cosine that leaves full brightness without a step and dips by
+    /// `breatheDepth` once per `breathePeriod`. `settle()` ends the marking at
+    /// a dip, so the fade always starts from the bottom. A pure function of
+    /// time, so it keeps running through the fade rather than snapping, which
+    /// would read as a flash.
     private func breath(sinceLift elapsed: Double) -> Double {
-        let breathing = elapsed - WaterTuning.breatheDelay
-        guard breathing > 0 else { return 1 }
-        let phase = 2 * Double.pi * breathing / WaterTuning.breathePeriod
+        let phase = 2 * Double.pi * elapsed / WaterTuning.breathePeriod
         return 1 - WaterTuning.breatheDepth * (1 - cos(phase)) / 2
     }
 

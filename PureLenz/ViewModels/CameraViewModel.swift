@@ -75,19 +75,12 @@ class CameraViewModel {
     /// Waits on the lens after a lift, then lets the lit patch at the lift
     /// point fade. A new press cancels it — that press is the focus now.
     private var focusSettleTask: Task<Void, Never>?
-    private var pressStart: ContinuousClock.Instant = .now
 
     /// Long-edge pixels for the frames the water refracts. `nextFramingPreviewImage`
     /// only ever downscales, so this is high enough to leave the video output's
     /// native size alone — the copy standing in for the viewfinder should not be
     /// visibly softer than the viewfinder. This is the effect's main cost dial.
     private static let rippleFrameSize: CGFloat = 2400
-
-    /// Shortest the lift point stays lit, measured from touch-down. A lens that
-    /// was already right can report back almost immediately; a glow that came
-    /// and went within a few frames would register as a flicker rather than an
-    /// answer.
-    private static let minimumHold: Duration = .seconds(0.3)
 
     // MARK: - Initialization
 
@@ -205,7 +198,9 @@ class CameraViewModel {
     /// touch-down, drags the dent while it moves, and on lift lets the water
     /// go and focuses the lens there. The finger is in the water exactly as
     /// long as it is on the glass; only the lit patch at the lift point waits
-    /// for the lens, and `settle()` lets it fade once focus lands.
+    /// for the lens, breathing until `settle()` tells it focus has landed —
+    /// and even then it finishes the breath it is in before fading, so the
+    /// glow always lasts a whole number of breaths.
     ///
     /// Both points come from `CameraPreview`, which is the only place that can
     /// convert between them correctly — `viewPoint` is where the water is
@@ -217,7 +212,6 @@ class CameraViewModel {
         case .began:
             // A new press supersedes a pending settle: this is the focus now.
             focusSettleTask?.cancel()
-            pressStart = .now
             let wasCalm = water.isCalm
             water.press(at: viewPoint)
             // One pump per calm-to-calm session. A press during the tail of the
@@ -235,13 +229,7 @@ class CameraViewModel {
             hapticManager.impact(.light)
             focusSettleTask = Task { [weak self] in
                 guard let self else { return }
-                // Bounded by `awaitFocusSettled`'s own timeout, so a lens that
-                // never reports still lets the glow fade.
                 await cameraService.awaitFocusSettled()
-                let lit = ContinuousClock.now - pressStart
-                if lit < Self.minimumHold {
-                    try? await Task.sleep(for: Self.minimumHold - lit)
-                }
                 guard !Task.isCancelled else { return }
                 water.settle()
             }
