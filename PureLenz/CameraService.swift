@@ -113,7 +113,18 @@ class CameraService: NSObject {
         case failed
     }
     
+    /// Published to the main queue, for the UI. Not the gate for starting the
+    /// session — see `isSessionConfigured`.
     var status: Status = .unconfigured
+
+    /// Set on `sessionQueue` the moment `configureSession` succeeds, and the
+    /// only thing `startSession` checks. `status` would not do: it is
+    /// published through `DispatchQueue.main.async`, so right after
+    /// configuration it still reads `.unconfigured` on the session queue —
+    /// and the scene going active can read it that way on the main queue too,
+    /// if configuration is still running. A start gated on `status` lost
+    /// that race on a cold launch and left the viewfinder black (#47).
+    private var isSessionConfigured = false
 
     /// Aspect ratio (long / short) of the saved RAW frame — the full sensor
     /// readout. Defaults to 4:3 (every iPhone rear sensor) and is set from the
@@ -757,11 +768,12 @@ class CameraService: NSObject {
             }
 
             session.commitConfiguration()
-            
+            isSessionConfigured = true
+
             DispatchQueue.main.async {
                 self.status = .configured
             }
-            
+
         } catch {
             session.commitConfiguration()
             DispatchQueue.main.async {
@@ -790,12 +802,21 @@ class CameraService: NSObject {
         }
     }
 
+    /// Start the session if it is configured and not already running.
+    ///
+    /// Idempotent, and safe to call early: `init` calls it on `sessionQueue`
+    /// right behind `configureSession`, where the serial queue guarantees the
+    /// configuration is done, and the scene going active calls it again from
+    /// the main queue whenever that happens to land. Whichever arrives first
+    /// after configuration starts the session; the other is a no-op.
     func startSession() {
-        guard status == .configured else { return }
-        // Start the session on the background thread
         sessionQueue.async {
+            guard self.isSessionConfigured else { return }
             if !self.session.isRunning && !self.session.isInterrupted {
                 self.session.startRunning()
+                // Info, not debug, so a field log can show the start — or its
+                // absence, which is what a black viewfinder looks like.
+                Logger.camera.info("Session started")
             }
         }
     }
