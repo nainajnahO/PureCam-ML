@@ -115,10 +115,15 @@ class CameraViewModel {
     /// tap/hold split, so the two holds feel like one gesture.
     private static let holdToTrackSeconds: TimeInterval = 0.5
 
-    /// Further seconds of holding before the second stage — the light meter
-    /// starts following the subject too. Twice the first wait: a hold that
-    /// only wants to track should be able to lift without brushing the
-    /// second stage, and the rumble that fills this wait needs room to rise.
+    /// Seconds of quiet after the first stage lands before anything further
+    /// is hinted at. The grab's tap needs to be felt as its own event; a
+    /// rumble starting on its heels reads as the tap not having ended.
+    private static let holdQuietSeconds: TimeInterval = 0.5
+
+    /// Further seconds of holding, after the quiet, before the second stage —
+    /// the light meter starts following the subject too. A rumble swells for
+    /// exactly this long, so the stage arrives as its peak. Long enough that
+    /// a hold that only wants to track can lift without brushing it.
     private static let holdToFollowMeterSeconds: TimeInterval = 1.0
 
     /// How far the finger may drift, in points, and still count as holding
@@ -254,9 +259,9 @@ class CameraViewModel {
     ///
     /// A finger that stays put is a hold instead, in two stages, each announced
     /// by its own haptic: half a second grabs the subject under the finger and
-    /// the lens follows it; a second more — under a rumble that swells the
-    /// whole way — and the light meter follows it too. A hold over nothing
-    /// the camera recognises stays a tap. Whatever
+    /// the lens follows it; a beat of quiet, then a second more under a
+    /// rumble that swells the whole way, and the light meter follows it too.
+    /// A hold over nothing the camera recognises stays a tap. Whatever
     /// stage the hold reached persists after the lift — both hands are free
     /// to shoot — until the next tap, or the subject leaves the frame.
     ///
@@ -341,9 +346,11 @@ class CameraViewModel {
             hapticManager.impact(.medium)
             onFocusEvent?(.subjectGrabbed)
 
-            // The wait for the second stage is felt, not silent: a rumble
-            // swells under the finger for exactly this long, so the impact
-            // that ends it arrives as a peak rather than a surprise.
+            // A beat of quiet, then the wait for the second stage is felt: a
+            // rumble swells under the finger for exactly that long, so the
+            // impact that ends it arrives as a peak rather than a surprise.
+            try? await Task.sleep(for: .seconds(Self.holdQuietSeconds))
+            guard !Task.isCancelled else { return }
             hapticManager.prepare(.heavy)
             hapticManager.startRisingRumble(over: Self.holdToFollowMeterSeconds)
             try? await Task.sleep(for: .seconds(Self.holdToFollowMeterSeconds))
