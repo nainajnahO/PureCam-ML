@@ -303,7 +303,10 @@ struct DataFrameBuilderTests {
                 saturation: 0.3,
                 centerWeightedLuminance: 0.5,
                 sceneLightLevel: 3.3,
-                timestamp: Date()
+                spotLuminance: 0.5,
+                hasSpotMeter: 0,
+                timestamp: Date(),
+                meteringPoint: nil
             ),
             iso: 64,
             shutterSeconds: 1.0 / 256.0
@@ -355,7 +358,7 @@ struct DataFrameBuilderTests {
     /// model being fed a column it never saw during training. Spelling the
     /// expected schema out here makes that rename fail a test rather than
     /// surface as a prediction error after the next training run.
-    @Test("the ML schema is exactly the fourteen expected columns, in order")
+    @Test("the ML schema is exactly the sixteen expected columns, in order")
     func schemaTableMatchesExpectedNames() {
         #expect(SceneFeatures.mlFeatures.map(\.name) == [
             "meanLuminance",
@@ -371,8 +374,57 @@ struct DataFrameBuilderTests {
             "colorTemperature",
             "saturation",
             "centerWeightedLuminance",
-            "sceneLightLevel"
+            "sceneLightLevel",
+            "spotLuminance",
+            "hasSpotMeter"
         ])
+    }
+
+    /// The V3 dataset on disk predates the spot columns. Those samples were all
+    /// metered from the centre, so they must decode as exactly that — not fail
+    /// and reset the user's recorded preferences.
+    @Test("a sample from before spot metering decodes as centre-metered")
+    func legacySampleDecodesAsCentreMetered() throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var json = try JSONSerialization.jsonObject(
+            with: encoder.encode(samples[0].features)
+        ) as! [String: Any]
+        json["centerWeightedLuminance"] = 0.375
+        json.removeValue(forKey: "spotLuminance")
+        json.removeValue(forKey: "hasSpotMeter")
+        json.removeValue(forKey: "meteringPoint")
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let restored = try decoder.decode(
+            SceneFeatures.self, from: JSONSerialization.data(withJSONObject: json)
+        )
+
+        #expect(restored.centerWeightedLuminance == 0.375)
+        #expect(restored.spotLuminance == 0.375)
+        #expect(restored.hasSpotMeter == 0)
+        #expect(restored.meteringPoint == nil)
+    }
+
+    /// Once saved by this build, a tapped sample must come back as tapped —
+    /// the point included, which is what makes the column recomputable later.
+    @Test("a spot-metered sample round-trips its point")
+    func spotSampleRoundTrips() throws {
+        let tapped = SceneFeatures(
+            meanLuminance: 0.5, medianLuminance: 0.5, minLuminance: 0, maxLuminance: 1,
+            stdDevLuminance: 0.2, shadowsPercent: 0.2, midtonesPercent: 0.6,
+            highlightsPercent: 0.2, clippedHighlightsPercent: 0.01,
+            clippedShadowsPercent: 0.01, colorTemperature: 5500, saturation: 0.3,
+            centerWeightedLuminance: 0.5, sceneLightLevel: 3.3, spotLuminance: 0.125,
+            hasSpotMeter: 1, timestamp: Date(), meteringPoint: CGPoint(x: 0.25, y: 0.75)
+        )
+
+        let restored = try JSONDecoder().decode(SceneFeatures.self, from: JSONEncoder().encode(tapped))
+
+        #expect(restored.spotLuminance == 0.125)
+        #expect(restored.hasSpotMeter == 1)
+        #expect(restored.meteringPoint == CGPoint(x: 0.25, y: 0.75))
     }
 }
 
@@ -429,6 +481,90 @@ struct CenterWeightedMeteringTests {
         )
 
         #expect(abs(features.centerWeightedLuminance - features.meanLuminance) < 0.001)
+    }
+}
+
+@Suite("Spot metering")
+struct SpotMeteringTests {
+    /// A dark 4:3 frame with a bright square in its top-left corner — as the
+    /// frame is *rendered*. Core Image's origin is bottom-left, so the patch is
+    /// placed at the top of the CI extent; that inversion is exactly what these
+    /// tests pin, because `focusPointOfInterest` counts (0,0) from the top-left.
+    private func topLeftBrightFrame() -> CIImage {
+        let frame = CGRect(x: 0, y: 0, width: 256, height: 192)
+        let background = CIImage(color: CIColor.black).cropped(to: frame)
+        let cornerPatch = CIImage(color: CIColor.white)
+            .cropped(to: CGRect(x: 0, y: 192 - 48, width: 48, height: 48))
+        return cornerPatch.composited(over: background)
+    }
+
+    /// The acceptance criterion "with nothing tapped, behaviour is identical to
+    /// today", pinned where it can hold exactly: at feature extraction. The spot
+    /// column is a bit-for-bit copy of the centre reading, and the flag is off.
+    @Test("an untapped frame spot-meters to exactly its centre-weighted reading")
+    func untappedSpotEqualsCentre() throws {
+        let features = try #require(
+            SceneFeatureExtractor().extract(
+                from: topLeftBrightFrame(), frameISO: 100, frameShutterSeconds: 1.0 / 60.0
+            )
+        )
+
+        #expect(features.spotLuminance == features.centerWeightedLuminance)
+        #expect(features.hasSpotMeter == 0)
+        #expect(features.meteringPoint == nil)
+    }
+
+    /// Tap the bright corner and the reading must follow the tap, not the
+    /// centre: it reads bright while the centre weighting, sitting on black,
+    /// reads dark. The mirrored tap on the dark corner reads darker still.
+    @Test("a tap moves the metering weight to the tapped point")
+    func tapMovesMeteringToPoint() throws {
+        let extractor = SceneFeatureExtractor()
+        let frame = topLeftBrightFrame()
+
+        let onPatch = try #require(
+            extractor.extract(
+                from: frame, frameISO: 100, frameShutterSeconds: 1.0 / 60.0,
+                meteringPoint: CGPoint(x: 0.1, y: 0.1)
+            )
+        )
+        let offPatch = try #require(
+            extractor.extract(
+                from: frame, frameISO: 100, frameShutterSeconds: 1.0 / 60.0,
+                meteringPoint: CGPoint(x: 0.9, y: 0.9)
+            )
+        )
+
+        #expect(onPatch.hasSpotMeter == 1)
+        #expect(onPatch.meteringPoint == CGPoint(x: 0.1, y: 0.1))
+        #expect(onPatch.spotLuminance > 0.5)
+        #expect(onPatch.spotLuminance > onPatch.centerWeightedLuminance)
+        #expect(offPatch.spotLuminance < 0.05)
+
+        // The tap must not leak into the column the models were trained on.
+        #expect(abs(onPatch.centerWeightedLuminance - offPatch.centerWeightedLuminance) < 1e-6)
+    }
+
+    /// The spot is tighter than the centre weighting. A tap on the centre of a
+    /// frame whose middle is bright and whose surround is dark must read
+    /// brighter than the broad centre weighting does, because less of the dark
+    /// surround is inside the spot.
+    @Test("the spot is tighter than the centre weighting")
+    func spotIsTighterThanCentre() throws {
+        let frame = CGRect(x: 0, y: 0, width: 256, height: 192)
+        let background = CIImage(color: CIColor.black).cropped(to: frame)
+        let centrePatch = CIImage(color: CIColor.white)
+            .cropped(to: CGRect(x: 112, y: 80, width: 32, height: 32))
+        let image = centrePatch.composited(over: background)
+
+        let features = try #require(
+            SceneFeatureExtractor().extract(
+                from: image, frameISO: 100, frameShutterSeconds: 1.0 / 60.0,
+                meteringPoint: CGPoint(x: 0.5, y: 0.5)
+            )
+        )
+
+        #expect(features.spotLuminance > features.centerWeightedLuminance)
     }
 }
 
@@ -562,7 +698,8 @@ struct TrainingDatasetEvictionTests {
                 stdDevLuminance: 0.2, shadowsPercent: 0.2, midtonesPercent: 0.6,
                 highlightsPercent: 0.2, clippedHighlightsPercent: 0.01,
                 clippedShadowsPercent: 0.01, colorTemperature: 5500, saturation: 0.3,
-                centerWeightedLuminance: 0.5, sceneLightLevel: 3.3, timestamp: Date()
+                centerWeightedLuminance: 0.5, sceneLightLevel: 3.3, spotLuminance: 0.5,
+                hasSpotMeter: 0, timestamp: Date(), meteringPoint: nil
             ),
             iso: 64,
             shutterSeconds: 1.0 / 256.0
@@ -637,7 +774,8 @@ struct TrainingFreshnessTests {
                 stdDevLuminance: 0.2, shadowsPercent: 0.2, midtonesPercent: 0.6,
                 highlightsPercent: 0.2, clippedHighlightsPercent: 0.01,
                 clippedShadowsPercent: 0.01, colorTemperature: 5500, saturation: 0.3,
-                centerWeightedLuminance: 0.5, sceneLightLevel: 3.3, timestamp: Date()
+                centerWeightedLuminance: 0.5, sceneLightLevel: 3.3, spotLuminance: 0.5,
+                hasSpotMeter: 0, timestamp: Date(), meteringPoint: nil
             ),
             iso: 64,
             shutterSeconds: 1.0 / 256.0

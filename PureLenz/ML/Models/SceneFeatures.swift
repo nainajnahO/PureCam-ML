@@ -78,10 +78,36 @@ struct SceneFeatures: Codable {
     /// suffix (see `MLFiles`) and are never read.
     let sceneLightLevel: Float
 
+    // MARK: - Spot Metering
+
+    /// Gaussian-weighted luminance around the metering point: a tight spot at
+    /// the tapped focus point while one is in effect, otherwise *exactly*
+    /// `centerWeightedLuminance`.
+    ///
+    /// A separate feature rather than a repurposed `centerWeightedLuminance`,
+    /// because that column is a trained input whose meaning ("the middle") the
+    /// models learned from every sample so far. Redefining it as "wherever the
+    /// user tapped" would shift a feature out from under the model; adding this
+    /// one alongside lets the model learn the difference — and keeps untapped
+    /// frames identical to what they always were.
+    let spotLuminance: Float
+
+    /// 1 when `spotLuminance` was metered at a tapped point, 0 when it is the
+    /// centre-weighted reading. A Float rather than a Bool because every model
+    /// input is a Float — `mlFeatures` is keyed on them.
+    let hasSpotMeter: Float
+
     // MARK: - Metadata
 
     /// When features were extracted
     let timestamp: Date
+
+    /// Where `spotLuminance` was metered, normalized (0,0) top-left … (1,1)
+    /// bottom-right of the analysed frame, or nil when it is the centre-weighted
+    /// reading. Not a model input. Kept with the sample for the same reason the
+    /// frame thumbnail is (`MLFiles.thumbnailDirectoryURL`): the spot's size is a
+    /// choice that may change, and only the point makes the column recomputable.
+    let meteringPoint: CGPoint?
 
     // MARK: - Scene Light Computation
 
@@ -112,7 +138,9 @@ struct SceneFeatures: Codable {
         ("colorTemperature", \.colorTemperature),
         ("saturation", \.saturation),
         ("centerWeightedLuminance", \.centerWeightedLuminance),
-        ("sceneLightLevel", \.sceneLightLevel)
+        ("sceneLightLevel", \.sceneLightLevel),
+        ("spotLuminance", \.spotLuminance),
+        ("hasSpotMeter", \.hasSpotMeter)
     ]
 
     // MARK: - ML Conversion
@@ -123,5 +151,41 @@ struct SceneFeatures: Codable {
             dict[feature.name] = self[keyPath: feature.value]
         }
         return try MLDictionaryFeatureProvider(dictionary: dict)
+    }
+}
+
+// MARK: - Decoding Samples From Before Spot Metering
+
+extension SceneFeatures {
+    /// Samples recorded before spot metering existed have no spot columns, but
+    /// their values are not unknown: every one of them was metered from the
+    /// centre, so the spot reading *is* the centre-weighted one with the flag
+    /// off. Filling them in here is what lets the recorded dataset train the
+    /// spot-aware models instead of being thrown away (#24: "legacy samples
+    /// migrate without a full retrain from scratch").
+    ///
+    /// Encoding stays synthesized, so a dataset saved by this build carries the
+    /// columns explicitly from then on.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        meanLuminance = try container.decode(Float.self, forKey: .meanLuminance)
+        medianLuminance = try container.decode(Float.self, forKey: .medianLuminance)
+        minLuminance = try container.decode(Float.self, forKey: .minLuminance)
+        maxLuminance = try container.decode(Float.self, forKey: .maxLuminance)
+        stdDevLuminance = try container.decode(Float.self, forKey: .stdDevLuminance)
+        shadowsPercent = try container.decode(Float.self, forKey: .shadowsPercent)
+        midtonesPercent = try container.decode(Float.self, forKey: .midtonesPercent)
+        highlightsPercent = try container.decode(Float.self, forKey: .highlightsPercent)
+        clippedHighlightsPercent = try container.decode(Float.self, forKey: .clippedHighlightsPercent)
+        clippedShadowsPercent = try container.decode(Float.self, forKey: .clippedShadowsPercent)
+        colorTemperature = try container.decode(Float.self, forKey: .colorTemperature)
+        saturation = try container.decode(Float.self, forKey: .saturation)
+        centerWeightedLuminance = try container.decode(Float.self, forKey: .centerWeightedLuminance)
+        sceneLightLevel = try container.decode(Float.self, forKey: .sceneLightLevel)
+        spotLuminance = try container.decodeIfPresent(Float.self, forKey: .spotLuminance)
+            ?? centerWeightedLuminance
+        hasSpotMeter = try container.decodeIfPresent(Float.self, forKey: .hasSpotMeter) ?? 0
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        meteringPoint = try container.decodeIfPresent(CGPoint.self, forKey: .meteringPoint)
     }
 }

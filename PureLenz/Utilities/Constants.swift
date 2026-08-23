@@ -33,25 +33,36 @@ enum CameraConstants {
 /// On-device ML artifacts: the two trained model files and the recorded
 /// training dataset. Named in one place so the writer (ModelTrainer), the
 /// reader (AutoExposureManager), and the recorder (TrainingDataManager) can
-/// never disagree — and so a schema bump touches all three together.
+/// never disagree.
 ///
-/// The V3 suffix marks the current schema: 14 features (including a true
-/// Gaussian center-weighted luminance) with log2-space targets. Any change to
-/// the feature set, to what a feature means, or to the target space makes
-/// previously recorded samples and previously trained models incompatible.
-/// Bump the suffix on all three names and the stale files are simply never
-/// read again — the rename, not a delete, is what makes them safe.
-/// `removeSupersededArtifacts()` then reclaims the space without needing to
-/// know which versions ever existed.
+/// Two suffixes, bumped for two different reasons:
+///
+/// - The **model** suffix marks the feature schema the installed models were
+///   trained with — V4 is 16 features (V3's 14 plus `spotLuminance` and
+///   `hasSpotMeter`) with log2-space targets. Any change to the feature set,
+///   to what a feature means, or to the target space makes previously trained
+///   models incompatible, so bump it: the old files are simply never read
+///   again, `modelsInstalled` turns false, and the next charge retrains from
+///   the dataset. The rename, not a delete, is what makes the stale files safe.
+/// - The **dataset** suffix marks the on-disk sample format. It stays put
+///   when the schema grows in a way existing samples can express — a column
+///   that can be filled in from what they already hold, or recomputed from
+///   their thumbnails (see `thumbnailDirectoryURL`) — and is bumped only for a
+///   change no migration can express, accepting that the samples are lost.
+///   V3 samples carry no spot columns and decode as centre-metered
+///   (`SceneFeatures.init(from:)`), which is exactly what they were.
+///
+/// `removeSupersededArtifacts()` reclaims the space behind either bump without
+/// needing to know which versions ever existed.
 enum MLFiles {
     /// Compiled ISO regressor installed in the Documents directory.
     static var isoModelURL: URL {
-        URL.documentsDirectory.appendingPathComponent("ISORegressorV3.mlmodelc")
+        URL.documentsDirectory.appendingPathComponent("ISORegressorV4.mlmodelc")
     }
 
     /// Compiled shutter regressor installed in the Documents directory.
     static var shutterModelURL: URL {
-        URL.documentsDirectory.appendingPathComponent("ShutterRegressorV3.mlmodelc")
+        URL.documentsDirectory.appendingPathComponent("ShutterRegressorV4.mlmodelc")
     }
 
     /// Recorded training samples.

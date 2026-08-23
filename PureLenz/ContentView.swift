@@ -46,6 +46,11 @@ struct ContentView: View {
                 focusRippleFrame: scene.cameraVM.focusRippleFrame,
                 onFocusTouch: { phase, viewPoint, devicePoint in
                     scene.cameraVM.focusTouch(phase, viewPoint: viewPoint, devicePoint: devicePoint)
+                    // The lift is what asks the lens; the light meter follows
+                    // it to the same point (spot metering, #24).
+                    if phase == .ended {
+                        scene.autoExposure.meterAtFocusedPoint()
+                    }
                 }
             )
 

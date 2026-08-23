@@ -126,8 +126,8 @@ class ModelTrainer {
 
         let metadata = MLModelMetadata(
             author: "PureLenz",
-            shortDescription: "Auto-exposure regressor trained on user preferences (sequential prediction, log2 targets)",
-            version: "3.0"
+            shortDescription: "Auto-exposure regressor trained on user preferences (sequential prediction, log2 targets, spot metering)",
+            version: "4.0"
         )
 
         try isoRegressor.write(to: isoModelURL, metadata: metadata)
