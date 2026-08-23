@@ -45,6 +45,13 @@ class CameraService: NSObject {
     // session's lifetime (see `configureSession`), not per tap.
     private var subjectAreaObserver: NSObjectProtocol?
 
+    // The session's own lifecycle notifications: interruption begin/end and
+    // runtime errors. Registered once in `configureSession` for the session's
+    // lifetime; without them a session that was interrupted at launch (another
+    // process still holding the camera), by a phone call, or by a media-server
+    // reset stays dead until the next background/foreground round trip.
+    private var sessionObservers: [NSObjectProtocol] = []
+
     /// Callers waiting for the current focus scan to settle. Only ever touched on
     /// `sessionQueue`, which is what guarantees each continuation resumes exactly
     /// once whether the lens or the timeout gets there first.
@@ -669,6 +676,51 @@ class CameraService: NSObject {
                 self?.releaseFocus()
             }
 
+            // `startSession` deliberately refuses to start an interrupted session,
+            // which is correct for the moment it runs — so something has to start
+            // it once the interruption lifts. Relaunching a dev build over a
+            // running instance is the common case: the new process configures
+            // its session while the old one still owns the camera. `startSession`
+            // is idempotent, so if the session resumed on its own this is a no-op.
+            sessionObservers = [
+                NotificationCenter.default.addObserver(
+                    forName: AVCaptureSession.wasInterruptedNotification,
+                    object: session,
+                    queue: .main
+                ) { notification in
+                    let rawReason = notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int
+                    let reason = rawReason.flatMap(AVCaptureSession.InterruptionReason.init(rawValue:))
+                    let description = reason.map { String(describing: $0) } ?? "unknown reason \(rawReason ?? -1)"
+                    // `.public` so the reason survives into a collected field log
+                    // instead of being redacted to `<private>`.
+                    Logger.camera.notice("Session interrupted: \(description, privacy: .public)")
+                },
+                NotificationCenter.default.addObserver(
+                    forName: AVCaptureSession.interruptionEndedNotification,
+                    object: session,
+                    queue: .main
+                ) { [weak self] _ in
+                    Logger.camera.notice("Session interruption ended - restarting")
+                    self?.startSession()
+                },
+                NotificationCenter.default.addObserver(
+                    forName: AVCaptureSession.runtimeErrorNotification,
+                    object: session,
+                    queue: .main
+                ) { [weak self] notification in
+                    guard let error = notification.userInfo?[AVCaptureSessionErrorKey] as? AVError else { return }
+                    // The media server restarting underneath a running app is the
+                    // other classic way to end up with a dead session; anything
+                    // else is logged and left alone.
+                    if error.code == .mediaServicesWereReset {
+                        Logger.camera.notice("Media services were reset - restarting session")
+                        self?.startSession()
+                    } else {
+                        Logger.camera.error("Session runtime error: \(error.localizedDescription, privacy: .public)")
+                    }
+                },
+            ]
+
             if session.canAddOutput(output) {
                 session.addOutput(output)
 
@@ -890,6 +942,7 @@ class CameraService: NSObject {
         exposureSeedObservation?.invalidate()
         exposureSeedTimeout?.cancel()
         removeSubjectAreaObserver()
+        sessionObservers.forEach(NotificationCenter.default.removeObserver)
     }
 }
 
