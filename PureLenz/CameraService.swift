@@ -78,6 +78,58 @@ class CameraService: NSObject {
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let videoOutputQueue = DispatchQueue(label: "com.purelenz.videoOutputQueue")
 
+    // Subject detection, done by the ISP: faces, people, pets and salient
+    // objects arrive as per-frame bounding boxes with stable identifiers, which
+    // is all hold-to-track needs. Delivered on `sessionQueue`, so the tracking
+    // state below shares a queue with the device configuration it drives.
+    private let metadataOutput = AVCaptureMetadataOutput()
+
+    /// The subjects the ISP saw in the most recent frame, and when. A hold
+    /// hit-tests against these to decide what was grabbed — but only while
+    /// they are fresh: nothing guarantees a callback for a frame with no
+    /// subjects in it, so without the timestamp a hold could grab a face that
+    /// left the picture seconds ago. Touched only on `sessionQueue`.
+    private var latestSubjects: [AVMetadataObject] = []
+    private var latestSubjectsAt: ContinuousClock.Instant?
+
+    /// The `objectID` of the subject being tracked, or nil while nothing is.
+    /// Touched only on `sessionQueue`.
+    private var trackedObjectID: Int?
+
+    /// Pending "the subject is gone" verdict. Re-armed on every sighting, so it
+    /// only fires once the subject has been absent for `subjectLossGraceSeconds`.
+    /// Touched only on `sessionQueue`.
+    private var subjectLossTimer: DispatchWorkItem?
+
+    /// How long a tracked subject may go unseen before tracking gives up.
+    /// Detections flicker — a head turn or a passing hand drops a face for a
+    /// few frames — and releasing on the first missed frame would make
+    /// tracking feel like it lets go at random.
+    private static let subjectLossGraceSeconds: TimeInterval = 0.7
+
+    /// How far, as a fraction of the frame, the tracked subject has to move
+    /// before the lens is re-pointed at it. Every reconfiguration locks the
+    /// device; doing that for sub-percent jitter thirty times a second is
+    /// work the camera should not pay for a subject that is standing still.
+    private static let focusRepointThreshold: CGFloat = 0.01
+
+    /// Where the tracked subject is, as a normalized rect in the same
+    /// top-left-origin unrotated-picture space as `focusPointOfInterest` and
+    /// `CapturedFrame.meteringPoint`; nil while nothing is tracked. Published
+    /// on the main queue for the marker that follows the subject on screen.
+    private(set) var trackedSubjectBounds: CGRect?
+
+    /// The point the model meters from, or nil while the lens is in plain
+    /// continuous AF and the model should meter the centre as it always has.
+    /// Set by `focus(at:)`, moved by tracking, cleared by `releaseFocus()`.
+    /// Stored explicitly rather than inferred from device flags: a tapped focus
+    /// and a tracked subject configure the device differently (one-shot scan
+    /// with subject-area monitoring on, versus continuous AF with monitoring
+    /// off), and the light meter should not have to know which is which.
+    /// Serialized on `videoOutputQueue`, like `pendingFrameRequests`, so a
+    /// frame reads it on its own queue — see `setMeteringPoint`.
+    private var meteringPoint: CGPoint?
+
     /// A live preview frame plus the exposure it was captured with. The exposure
     /// lets ML normalize the frame's brightness into an absolute scene light level
     /// (the same image can come from a sunny scene at ISO 32 or a dim one at ISO 1600).
@@ -86,9 +138,10 @@ class CameraService: NSObject {
         let iso: Float
         let shutterSeconds: Double
 
-        /// The tapped focus point in effect when the frame was delivered, or nil
-        /// while the lens is in continuous AF. Spot metering rides on focus: the
-        /// model meters `SceneFeatures.spotLuminance` here.
+        /// The focus point in effect when the frame was delivered — tapped, or
+        /// the tracked subject's centre — or nil while the lens is in plain
+        /// continuous AF. Spot metering rides on focus: the model meters
+        /// `SceneFeatures.spotLuminance` here.
         ///
         /// In `focusPointOfInterest`'s normalized device coordinates — (0,0)
         /// top-left, (1,1) bottom-right of the native sensor frame — which is
@@ -360,6 +413,9 @@ class CameraService: NSObject {
     /// away the model's decision on every tap. The model meters at the tapped
     /// point instead — every `CapturedFrame` delivered while this focus is in
     /// effect carries it as `meteringPoint`, until `releaseFocus()` lets go.
+    ///
+    /// A tap is also how tracking ends: whatever subject was being followed is
+    /// let go before the lens is pointed at the tapped spot.
     func focus(at devicePoint: CGPoint) {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
@@ -368,6 +424,8 @@ class CameraService: NSObject {
 
             guard device.isFocusPointOfInterestSupported,
                   device.isFocusModeSupported(.autoFocus) else { return }
+
+            self.stopTracking()
 
             do {
                 try device.lockForConfiguration()
@@ -382,9 +440,137 @@ class CameraService: NSObject {
                 // itself already stands for the whole session (`configureSession`).
                 device.isSubjectAreaChangeMonitoringEnabled = true
                 device.unlockForConfiguration()
+                self.setMeteringPoint(devicePoint)
             } catch {
                 Logger.camera.error("Failed to lock configuration for focus: \(error.localizedDescription)")
             }
+        }
+    }
+
+    // MARK: - Subject tracking
+
+    /// Lock onto whatever detected subject is under a held finger, and keep the
+    /// lens on it as it moves. Returns whether anything was grabbed.
+    ///
+    /// The point is in the same normalized device space as `focus(at:)`, and is
+    /// hit-tested against the ISP's detections in that space directly — their
+    /// `bounds` use the same top-left-origin unrotated-picture convention, so no
+    /// second conversion is needed. The screen-to-device conversion the point
+    /// has already been through (`CameraPreview`) is the one that matters; a
+    /// raw screen fraction would miss everywhere but the centre.
+    ///
+    /// Tracking is the other focus state, alongside the tap: continuous AF with
+    /// `focusPointOfInterest` re-pointed at the subject every time it moves,
+    /// and subject-area monitoring **off** — the focus scans tracking causes
+    /// are exactly the "scene changed" events that monitoring would answer by
+    /// releasing the lens. The light meter follows too: every frame carries
+    /// the subject's centre as `meteringPoint`, so the model meters the subject
+    /// wherever it goes.
+    ///
+    /// With several subjects under the finger, the smallest wins: a face inside
+    /// a body is the more specific thing to have pointed at.
+    func beginTracking(at devicePoint: CGPoint) async -> Bool {
+        await withCheckedContinuation { continuation in
+            sessionQueue.async { [weak self] in
+                guard let self else { return continuation.resume(returning: false) }
+
+                let fresh = self.latestSubjectsAt.map {
+                    $0.duration(to: .now) < .seconds(Self.subjectLossGraceSeconds)
+                } ?? false
+                let subject = fresh ? self.latestSubjects
+                    .filter { $0.bounds.contains(devicePoint) }
+                    .min { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height }
+                    : nil
+                guard let subject else {
+                    Logger.camera.info("Hold found no subject to track")
+                    return continuation.resume(returning: false)
+                }
+
+                guard let input = self.session.inputs.first as? AVCaptureDeviceInput else {
+                    return continuation.resume(returning: false)
+                }
+                let device = input.device
+                guard device.isFocusPointOfInterestSupported,
+                      device.isFocusModeSupported(.continuousAutoFocus) else {
+                    return continuation.resume(returning: false)
+                }
+
+                do {
+                    try device.lockForConfiguration()
+                    device.focusPointOfInterest = CGPoint(x: subject.bounds.midX, y: subject.bounds.midY)
+                    device.focusMode = .continuousAutoFocus
+                    device.isSubjectAreaChangeMonitoringEnabled = false
+                    device.unlockForConfiguration()
+                } catch {
+                    Logger.camera.error("Failed to lock configuration for tracking: \(error.localizedDescription)")
+                    return continuation.resume(returning: false)
+                }
+
+                self.trackedObjectID = subject.objectID
+                // `.public`: the type is an Apple constant, and which kinds of
+                // subject get grabbed in the field is the thing worth knowing.
+                Logger.camera.info("Tracking \(subject.type.rawValue, privacy: .public) #\(subject.objectID)")
+                self.subjectSighted(subject)
+                continuation.resume(returning: true)
+            }
+        }
+    }
+
+    /// Record a fresh sighting of the tracked subject: follow it with the lens
+    /// and the meter, show it to the UI, and push back the moment tracking
+    /// would give up on it. On `sessionQueue`.
+    private func subjectSighted(_ subject: AVMetadataObject) {
+        let centre = CGPoint(x: subject.bounds.midX, y: subject.bounds.midY)
+
+        if let input = session.inputs.first as? AVCaptureDeviceInput {
+            let device = input.device
+            let current = device.focusPointOfInterest
+            if hypot(centre.x - current.x, centre.y - current.y) > Self.focusRepointThreshold {
+                do {
+                    try device.lockForConfiguration()
+                    device.focusPointOfInterest = centre
+                    device.unlockForConfiguration()
+                } catch {
+                    Logger.camera.error("Failed to lock configuration to follow subject: \(error.localizedDescription)")
+                }
+            }
+        }
+        setMeteringPoint(centre)
+
+        let bounds = subject.bounds
+        DispatchQueue.main.async { [weak self] in
+            self?.trackedSubjectBounds = bounds
+        }
+
+        subjectLossTimer?.cancel()
+        let timer = DispatchWorkItem { [weak self] in
+            guard let self, self.trackedObjectID != nil else { return }
+            Logger.camera.info("Tracked subject lost - resuming continuous focus")
+            self.releaseFocus()
+        }
+        subjectLossTimer = timer
+        sessionQueue.asyncAfter(deadline: .now() + Self.subjectLossGraceSeconds, execute: timer)
+    }
+
+    /// Forget the tracked subject. Leaves the device as it is — the callers
+    /// each go on to configure it for what comes next. On `sessionQueue`.
+    private func stopTracking() {
+        guard trackedObjectID != nil else { return }
+        trackedObjectID = nil
+        subjectLossTimer?.cancel()
+        subjectLossTimer = nil
+        DispatchQueue.main.async { [weak self] in
+            self?.trackedSubjectBounds = nil
+        }
+    }
+
+    /// Hop the metering point onto the frame queue, so a frame only ever reads
+    /// a value written on its own queue. Serial ordering also makes it correct:
+    /// a re-metering that waited for `focus(at:)` to run enqueues its frame
+    /// request after this write.
+    private func setMeteringPoint(_ point: CGPoint?) {
+        videoOutputQueue.async { [weak self] in
+            self?.meteringPoint = point
         }
     }
 
@@ -493,9 +679,9 @@ class CameraService: NSObject {
 
     /// Hand focus back to the device: continuous AF, point recentred, monitoring off.
     ///
-    /// Idempotent, and safe to call when no tapped focus is in effect — which is
-    /// what lets both callers share it: the subject-area observer, and the app
-    /// leaving the foreground.
+    /// Idempotent, and safe to call when no tapped focus or tracked subject is
+    /// in effect — which is what lets every caller share it: the subject-area
+    /// observer, the subject-loss timer, and the app leaving the foreground.
     ///
     /// **Why leaving the foreground releases focus.** A tapped focus is transient
     /// state, exactly like the reticle that marks it. Surviving a glance at
@@ -516,6 +702,8 @@ class CameraService: NSObject {
 
             guard device.isFocusModeSupported(.continuousAutoFocus) else { return }
 
+            self.stopTracking()
+
             do {
                 try device.lockForConfiguration()
                 if device.isFocusPointOfInterestSupported {
@@ -524,6 +712,7 @@ class CameraService: NSObject {
                 device.focusMode = .continuousAutoFocus
                 device.isSubjectAreaChangeMonitoringEnabled = false
                 device.unlockForConfiguration()
+                self.setMeteringPoint(nil)
             } catch {
                 Logger.camera.error(
                     "Failed to lock configuration to resume continuous focus: \(error.localizedDescription)"
@@ -673,7 +862,16 @@ class CameraService: NSObject {
                 object: camera,
                 queue: .main
             ) { [weak self] _ in
-                self?.releaseFocus()
+                guard let self else { return }
+                // Monitoring is switched off the moment a subject is grabbed,
+                // but a notification already in flight from the tap that
+                // preceded the hold can still land here; it must not undo the
+                // grab. The check runs on `sessionQueue`, where tracking state
+                // lives, and `releaseFocus` would hop there anyway.
+                self.sessionQueue.async {
+                    guard self.trackedObjectID == nil else { return }
+                    self.releaseFocus()
+                }
             }
 
             // `startSession` deliberately refuses to start an interrupted session,
@@ -754,6 +952,22 @@ class CameraService: NSObject {
                 videoDataOutput.videoSettings = [
                     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
                 ]
+            }
+
+            // Subject detection for hold-to-track. Faces, people and pets
+            // cover nearly every real subject; salient objects catch a fair
+            // share of the rest. The available types are only known once the
+            // output is attached, and asking for one the device cannot detect
+            // raises — hence the filter after `addOutput`.
+            if session.canAddOutput(metadataOutput) {
+                session.addOutput(metadataOutput)
+                metadataOutput.setMetadataObjectsDelegate(self, queue: sessionQueue)
+                let wanted: [AVMetadataObject.ObjectType] = [
+                    .face, .humanBody, .catBody, .dogBody, .salientObject
+                ]
+                metadataOutput.metadataObjectTypes = wanted.filter(
+                    metadataOutput.availableMetadataObjectTypes.contains
+                )
             }
 
             session.commitConfiguration()
@@ -1041,17 +1255,8 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
             frameShutter = device.exposureDuration.seconds
         }
 
-        // A tapped focus is in effect exactly while subject-area monitoring is
-        // on: `focus(at:)` is the only thing that switches it on and
-        // `releaseFocus()` the only thing that switches it off, so the flag is
-        // app-owned truth. `focusMode` would not do — a device whose resting
-        // mode is not continuous would read as permanently tapped at the centre.
         // Read here, on the frame's own queue, so the point travels with the
         // frame it applies to rather than whatever is true when ML gets to it.
-        let meteringPoint = device.flatMap { device in
-            device.isSubjectAreaChangeMonitoringEnabled ? device.focusPointOfInterest : nil
-        }
-
         let frame = CapturedFrame(
             image: ciImage, iso: frameISO, shutterSeconds: frameShutter, meteringPoint: meteringPoint
         )
@@ -1061,6 +1266,27 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
         for request in requests {
             request.continuation.resume(returning: frame)
         }
+    }
+}
+
+// MARK: - Metadata Output Delegate (subject detection for hold-to-track)
+extension CameraService: AVCaptureMetadataOutputObjectsDelegate {
+    /// Runs on `sessionQueue` (see `configureSession`). Keeps the latest
+    /// detections for the next hold to hit-test, and follows the tracked
+    /// subject by its `objectID` — which the ISP keeps stable for as long as
+    /// the subject stays in the picture, and never reuses.
+    ///
+    /// A frame without the tracked subject is not a loss by itself; the
+    /// grace timer armed by `subjectSighted` decides that.
+    func metadataOutput(_ output: AVCaptureMetadataOutput,
+                        didOutput metadataObjects: [AVMetadataObject],
+                        from connection: AVCaptureConnection) {
+        latestSubjects = metadataObjects
+        latestSubjectsAt = .now
+
+        guard let trackedObjectID,
+              let subject = metadataObjects.first(where: { $0.objectID == trackedObjectID }) else { return }
+        subjectSighted(subject)
     }
 }
 

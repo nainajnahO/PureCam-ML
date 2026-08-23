@@ -15,6 +15,20 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import SwiftUI
+import AVFoundation
+
+/// The outline that rides on a tracked subject: a thin light ring, sized to
+/// the subject's box. Quiet on purpose — it sits on a face for as long as the
+/// subject is held, so it has to be something the eye can look past.
+private struct TrackingMarker: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .strokeBorder(.white.opacity(0.85), lineWidth: 1.5)
+            // Legible over a bright subject, without a dark outline that
+            // would read as a drawn box.
+            .shadow(color: .black.opacity(0.35), radius: 2)
+    }
+}
 
 struct CameraFeedView: View {
     let cameraService: CameraService
@@ -33,6 +47,10 @@ struct CameraFeedView: View {
     /// Surfaces a finger on the viewfinder, already converted to a sensor point (see `CameraPreview`).
     var onFocusTouch: ((FocusTouchPhase, _ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)? = nil
 
+    /// The preview layer, for mapping the tracked subject's sensor-space box
+    /// onto the screen. Set once the preview is made (see `CameraPreview`).
+    @State private var previewLayer: AVCaptureVideoPreviewLayer?
+
     var body: some View {
         if cameraService.status == .configured {
             GeometryReader { geometry in
@@ -40,7 +58,8 @@ struct CameraFeedView: View {
                     CameraPreview(
                         session: cameraService.session,
                         onCropFraction: onCropFraction,
-                        onFocusTouch: onFocusTouch
+                        onFocusTouch: onFocusTouch,
+                        onPreviewLayer: { previewLayer = $0 }
                     )
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .opacity(showRAWPreview ? 0 : 1)
@@ -78,7 +97,24 @@ struct CameraFeedView: View {
                             .clipped()
                             .transition(.opacity)
                     }
+
+                    // The tracked subject's marker. Above the water's copy on
+                    // purpose: the grab lands while the finger is still down
+                    // and the copy still up, and the marker is how the grab is
+                    // seen. Distinct from the one-shot focus by construction —
+                    // an outline that moves, rather than a lit patch that
+                    // breathes where the finger lifted.
+                    if let bounds = cameraService.trackedSubjectBounds, let previewLayer {
+                        let rect = previewLayer.layerRectConverted(fromMetadataOutputRect: bounds)
+                        TrackingMarker()
+                            .frame(width: rect.width, height: rect.height)
+                            .position(x: rect.midX, y: rect.midY)
+                            .animation(.smooth(duration: 0.2), value: rect)
+                            .transition(.opacity.combined(with: .scale(scale: 1.15)))
+                            .allowsHitTesting(false)
+                    }
                 }
+                .animation(.easeOut(duration: 0.25), value: cameraService.trackedSubjectBounds == nil)
                 // Fires at first layout, before any finger can land, and the
                 // preview is framed to this same size.
                 .onGeometryChange(for: CGSize.self) { $0.size } action: { size in

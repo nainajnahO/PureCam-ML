@@ -61,6 +61,14 @@ class AutoExposureCoordinator: NSObject {
     /// it, the same way a newer press supersedes the water's settle.
     private var focusInferenceTask: Task<Void, Never>?
 
+    /// The once-a-second re-metering of a tracked subject (`startFollowMetering`).
+    private var followMeteringTask: Task<Void, Never>?
+
+    /// How often the model re-meters a subject it is following. Each pass
+    /// springs the knobs and ramps the exposure, so this is the slowest rate
+    /// that still keeps up with a subject walking from shade into sun.
+    private static let followMeteringInterval: Duration = .seconds(1)
+
     // MARK: - Initialization
 
     init(
@@ -78,6 +86,7 @@ class AutoExposureCoordinator: NSObject {
         exposureRampLink?.invalidate()
         startupInferenceTask?.cancel()
         focusInferenceTask?.cancel()
+        followMeteringTask?.cancel()
     }
 
     // MARK: - Public Methods
@@ -95,9 +104,11 @@ class AutoExposureCoordinator: NSObject {
     /// discovering it had nothing to do.
     func handleScenePhaseChange(_ newPhase: ScenePhase) {
         startupInferenceTask?.cancel()
-        // Leaving the foreground releases the tapped focus (CameraViewModel), so
-        // a re-metering still waiting on it would meter a point no longer held.
+        // Leaving the foreground releases the tapped focus and the tracked
+        // subject (CameraViewModel), so a re-metering still waiting on either
+        // would meter a point no longer held.
         focusInferenceTask?.cancel()
+        stopFollowMetering()
         guard newPhase == .active else { return }
         autoExposureManager.resetForNewSession()
 
@@ -161,23 +172,51 @@ class AutoExposureCoordinator: NSObject {
     /// behind the tap's `focus(at:)` — and the picture the model meters should
     /// be the sharp one.
     ///
-    /// The gate on whether to re-run at all lives in the manager
-    /// (`runFocusInference`): only while the model holds the exposure, never
-    /// over a manual knob setting.
+    /// Also the first re-metering after a hold grabs a subject: tracking runs
+    /// continuous AF, which the settle wait sees through at once, so this
+    /// meters the subject as soon as the lens has been pointed at it.
     func meterAtFocusedPoint() {
         focusInferenceTask?.cancel()
         focusInferenceTask = Task { [weak self] in
             guard let self else { return }
             await cameraService.awaitFocusSettled()
             guard !Task.isCancelled else { return }
-            guard let frame = await cameraService.captureNextFrame() else {
-                Logger.ml.debug("No preview frame available for spot re-metering")
-                return
+            await meterCurrentFrame()
+        }
+    }
+
+    /// Keep re-metering the tracked subject, once a second, for as long as it
+    /// is tracked. The point the model meters from already follows the subject
+    /// (`CameraService.CapturedFrame.meteringPoint`); this only has to keep
+    /// asking for frames. Stops on its own when tracking ends, however it
+    /// ends — a tap, the subject leaving the frame, the app going inactive.
+    func startFollowMetering() {
+        stopFollowMetering()
+        followMeteringTask = Task { [weak self] in
+            while let self, !Task.isCancelled, cameraService.trackedSubjectBounds != nil {
+                await meterCurrentFrame()
+                try? await Task.sleep(for: Self.followMeteringInterval)
             }
-            guard !Task.isCancelled else { return }
-            if let prediction = autoExposureManager.runFocusInference(from: frame) {
-                applyAIPrediction(iso: prediction.iso, shutter: prediction.shutterSeconds)
-            }
+        }
+    }
+
+    /// End the follow-metering loop, if one is running.
+    func stopFollowMetering() {
+        followMeteringTask?.cancel()
+        followMeteringTask = nil
+    }
+
+    /// Run the model on the next frame and apply what it predicts. The gate on
+    /// whether to run at all lives in the manager (`runFocusInference`): only
+    /// while the model holds the exposure, never over a manual knob setting.
+    private func meterCurrentFrame() async {
+        guard let frame = await cameraService.captureNextFrame() else {
+            Logger.ml.debug("No preview frame available for spot re-metering")
+            return
+        }
+        guard !Task.isCancelled else { return }
+        if let prediction = autoExposureManager.runFocusInference(from: frame) {
+            applyAIPrediction(iso: prediction.iso, shutter: prediction.shutterSeconds)
         }
     }
 

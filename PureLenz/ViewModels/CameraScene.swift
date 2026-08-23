@@ -45,19 +45,37 @@ final class CameraScene {
             autoExposureManager: autoExposureManager
         )
 
-        self.cameraService = cameraService
-        self.haptics = haptics
-        self.cameraVM = cameraVM
-        self.exposureVM = exposureVM
-        self.autoExposure = AutoExposureCoordinator(
+        let autoExposure = AutoExposureCoordinator(
             cameraService: cameraService,
             exposureControlVM: exposureVM,
             autoExposureManager: autoExposureManager
         )
 
+        self.cameraService = cameraService
+        self.haptics = haptics
+        self.cameraVM = cameraVM
+        self.exposureVM = exposureVM
+        self.autoExposure = autoExposure
+
         // Wire up capture callbacks once. Device orientation is owned by
         // CameraService, derived from its RotationCoordinator.
         cameraVM.setupCamera()
+
+        // The light meter follows the lens: a tap or a grabbed subject is
+        // re-metered once (spot metering, #24); a held subject is re-metered
+        // for as long as it is tracked (#25). A tap ends any following, since
+        // it ends the tracking the following rides on.
+        cameraVM.onFocusEvent = { event in
+            switch event {
+            case .tapped:
+                autoExposure.stopFollowMetering()
+                autoExposure.meterAtFocusedPoint()
+            case .subjectGrabbed:
+                autoExposure.meterAtFocusedPoint()
+            case .followMeteringArmed:
+                autoExposure.startFollowMetering()
+            }
+        }
     }
 
     /// Forward app lifecycle changes to the view models that care about them.

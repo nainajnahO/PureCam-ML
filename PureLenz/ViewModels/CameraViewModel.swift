@@ -76,6 +76,53 @@ class CameraViewModel {
     /// point fade. A new press cancels it — that press is the focus now.
     private var focusSettleTask: Task<Void, Never>?
 
+    /// What a finger on the viewfinder asked of the camera, reported as it
+    /// happens so the light meter can follow the lens (`CameraScene` wires it
+    /// to `AutoExposureCoordinator`).
+    enum FocusEvent {
+        /// A tap: the lens was sent to a point. Fires on the lift.
+        case tapped
+        /// A hold grabbed a subject: the lens now follows it.
+        case subjectGrabbed
+        /// The hold went on: the model should keep re-metering the subject.
+        case followMeteringArmed
+    }
+    var onFocusEvent: ((FocusEvent) -> Void)?
+
+    /// How far a hold has got, for the touch currently on the glass.
+    private enum HoldStage {
+        /// Still a tap, or a hold that found nothing to grab.
+        case none
+        /// The lens follows a subject.
+        case tracking
+        /// The lens and the light meter both follow it.
+        case following
+    }
+    private var holdStage = HoldStage.none
+
+    /// Counts down the hold's two stages while the finger stays put. Cancelled
+    /// by a lift, or by the finger wandering before the first stage lands.
+    private var holdTask: Task<Void, Never>?
+
+    /// Where the finger landed and where it is now, for the hold: the stages
+    /// only count down while it stays near where it landed, and the grab is
+    /// made where it is when the first stage lands, not where it landed.
+    private var touchDownViewPoint = CGPoint.zero
+    private var latestDevicePoint = CGPoint.zero
+
+    /// Seconds of holding still before the first stage — a subject is grabbed.
+    /// The same wait as the preview button's long press, the app's one other
+    /// tap/hold split, so the two holds feel like one gesture.
+    private static let holdToTrackSeconds: TimeInterval = 0.5
+
+    /// Further seconds of holding before the second stage — the light meter
+    /// starts following the subject too.
+    private static let holdToFollowMeterSeconds: TimeInterval = 0.5
+
+    /// How far the finger may drift, in points, and still count as holding
+    /// still. A finger resting on glass is never perfectly still.
+    private static let holdSlopPoints: CGFloat = 12
+
     /// Long-edge pixels for the frames the water refracts. `nextFramingPreviewImage`
     /// only ever downscales, so this is high enough to leave the video output's
     /// native size alone — the copy standing in for the viewfinder should not be
@@ -107,6 +154,7 @@ class CameraViewModel {
             stopFramingPreviewLoop()
             rippleFramesTask?.cancel()
             focusSettleTask?.cancel()
+            holdTask?.cancel()
             water.reset()
             // Cancelling mid-wave leaves the copy on screen, which would freeze
             // the viewfinder on a stale frame until the next touch.
@@ -202,6 +250,13 @@ class CameraViewModel {
     /// and even then it finishes the breath it is in before fading, so the
     /// glow always lasts a whole number of breaths.
     ///
+    /// A finger that stays put is a hold instead, in two stages, each announced
+    /// by its own haptic: half a second grabs the subject under the finger and
+    /// the lens follows it; half a second more and the light meter follows it
+    /// too. A hold over nothing the camera recognises stays a tap. Whatever
+    /// stage the hold reached persists after the lift — both hands are free
+    /// to shoot — until the next tap, or the subject leaves the frame.
+    ///
     /// Both points come from `CameraPreview`, which is the only place that can
     /// convert between them correctly — `viewPoint` is where the water is
     /// pressed, `devicePoint` is the normalized sensor point focus needs.
@@ -219,14 +274,33 @@ class CameraViewModel {
             if wasCalm, !water.isCalm {
                 startRippleFrames()
             }
+            touchDownViewPoint = viewPoint
+            latestDevicePoint = devicePoint
+            holdStage = .none
+            startHoldCountdown()
 
         case .moved:
             water.move(to: viewPoint)
+            latestDevicePoint = devicePoint
+            // A finger on the move is dragging the water, not holding; once a
+            // subject is grabbed, though, the finger's position is moot.
+            if holdStage == .none,
+               hypot(viewPoint.x - touchDownViewPoint.x, viewPoint.y - touchDownViewPoint.y) > Self.holdSlopPoints {
+                holdTask?.cancel()
+            }
 
         case .ended:
+            holdTask?.cancel()
             water.lift()
+            guard holdStage == .none else {
+                // The hold already chose; the lift just lets the water go. The
+                // lit patch fades on its own, the tracking marker takes over.
+                water.settle()
+                return
+            }
             cameraService.focus(at: devicePoint)
             hapticManager.impact(.light)
+            onFocusEvent?(.tapped)
             focusSettleTask = Task { [weak self] in
                 guard let self else { return }
                 await cameraService.awaitFocusSettled()
@@ -236,9 +310,36 @@ class CameraViewModel {
 
         case .cancelled:
             // Nothing was chosen: the water lets go and nothing waits for a
-            // lens that was never asked.
+            // lens that was never asked. A hold that had already grabbed keeps
+            // what it grabbed — the system took the finger, not the subject.
+            holdTask?.cancel()
             water.lift()
             water.settle()
+        }
+    }
+
+    /// Count the hold's stages down while the finger stays on the glass. Each
+    /// stage is reached only if the previous one landed: a hold over nothing
+    /// recognisable never reaches the first, so it never reaches the second.
+    private func startHoldCountdown() {
+        holdTask?.cancel()
+        hapticManager.prepare(.medium)
+        holdTask = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(Self.holdToTrackSeconds))
+            guard !Task.isCancelled else { return }
+            guard await cameraService.beginTracking(at: latestDevicePoint) else { return }
+            guard !Task.isCancelled else { return }
+            holdStage = .tracking
+            hapticManager.impact(.medium)
+            onFocusEvent?(.subjectGrabbed)
+
+            hapticManager.prepare(.heavy)
+            try? await Task.sleep(for: .seconds(Self.holdToFollowMeterSeconds))
+            guard !Task.isCancelled else { return }
+            holdStage = .following
+            hapticManager.impact(.heavy)
+            onFocusEvent?(.followMeteringArmed)
         }
     }
 

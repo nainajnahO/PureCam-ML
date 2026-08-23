@@ -117,6 +117,12 @@ struct CameraPreview: UIViewRepresentable {
     var onCropFraction: ((CGFloat) -> Void)?
     /// Surfaces a finger on the viewfinder, already converted to a sensor point (see `VideoPreviewView`).
     var onFocusTouch: ((FocusTouchPhase, _ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)?
+    /// Hands the preview layer itself to whoever needs to map sensor-space
+    /// rects onto the screen — the tracking marker, which follows a subject
+    /// the camera reports in sensor coordinates. Only the layer knows the
+    /// aspect-fill crop and rotation that conversion depends on. Called once,
+    /// when the view is made.
+    var onPreviewLayer: ((AVCaptureVideoPreviewLayer) -> Void)?
 
     func makeUIView(context: Context) -> VideoPreviewView {
         let view = VideoPreviewView()
@@ -127,6 +133,11 @@ struct CameraPreview: UIViewRepresentable {
         view.onFocusTouch = onFocusTouch
 
         updateRotation(for: view.videoPreviewLayer)
+
+        // Deferred past the current update so the receiver can store it in
+        // view state without mutating mid-update.
+        let layer = view.videoPreviewLayer
+        DispatchQueue.main.async { onPreviewLayer?(layer) }
 
         return view
     }
