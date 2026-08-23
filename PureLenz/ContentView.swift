@@ -46,7 +46,8 @@ struct ContentView: View {
                 focusRippleFrame: scene.cameraVM.focusRippleFrame,
                 onFocusTouch: { phase, viewPoint, devicePoint in
                     scene.cameraVM.focusTouch(phase, viewPoint: viewPoint, devicePoint: devicePoint)
-                }
+                },
+                isFollowMetering: scene.cameraVM.isFollowMetering
             )
 
             // LAYER 2: Button UI (foreground)

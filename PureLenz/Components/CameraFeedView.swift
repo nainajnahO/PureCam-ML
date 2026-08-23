@@ -20,11 +20,18 @@ import AVFoundation
 /// The marker that rides on a tracked subject: four thin corner brackets at
 /// the subject's box. Corners only, no sides — it sits on a face for as long
 /// as the subject is held, so it has to be something the eye can look past,
-/// and an open frame hides less of what it frames.
+/// and an open frame hides less of what it frames. White while only the
+/// lens follows the subject; the shutter dial's yellow once the light meter
+/// does too.
 private struct TrackingMarker: View {
+    let isFollowMetering: Bool
+
     var body: some View {
         CornerBrackets()
-            .stroke(.white.opacity(0.85), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            .stroke(
+                (isFollowMetering ? Color.yellow : Color.white).opacity(0.85),
+                style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)
+            )
             // Legible over a bright subject, without a dark outline that
             // would read as a drawn box.
             .shadow(color: .black.opacity(0.35), radius: 2)
@@ -68,6 +75,9 @@ struct CameraFeedView: View {
     var focusRippleFrame: UIImage? = nil
     /// Surfaces a finger on the viewfinder, already converted to a sensor point (see `CameraPreview`).
     var onFocusTouch: ((FocusTouchPhase, _ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void)? = nil
+    /// Whether the tracked subject is being re-metered as well as focused —
+    /// the marker's colour (see `TrackingMarker`).
+    var isFollowMetering = false
 
     /// The preview layer, for mapping the tracked subject's sensor-space box
     /// onto the screen. Set once the preview is made (see `CameraPreview`).
@@ -128,7 +138,7 @@ struct CameraFeedView: View {
                     // breathes where the finger lifted.
                     if let bounds = cameraService.trackedSubjectBounds, let previewLayer {
                         let rect = previewLayer.layerRectConverted(fromMetadataOutputRect: bounds)
-                        TrackingMarker()
+                        TrackingMarker(isFollowMetering: isFollowMetering)
                             .frame(width: rect.width, height: rect.height)
                             .position(x: rect.midX, y: rect.midY)
                             // Each new box is a real move (CameraService holds

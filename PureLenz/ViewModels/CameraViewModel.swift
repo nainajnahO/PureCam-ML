@@ -100,6 +100,13 @@ class CameraViewModel {
     }
     private var holdStage = HoldStage.none
 
+    /// Whether the tracked subject is also being re-metered — the hold's
+    /// second stage. The marker on the subject shows it: white while only the
+    /// lens follows, yellow (the shutter dial's colour) once the meter does
+    /// too. Snaps, rather than fades, on the impact that arms it; the dots
+    /// under the finger have already warmed to yellow by then.
+    private(set) var isFollowMetering = false
+
     /// Counts down the hold's two stages while the finger stays put. Cancelled
     /// by a lift, or by the finger wandering before the first stage lands.
     private var holdTask: Task<Void, Never>?
@@ -162,6 +169,7 @@ class CameraViewModel {
             rippleFramesTask?.cancel()
             focusSettleTask?.cancel()
             holdTask?.cancel()
+            isFollowMetering = false
             water.reset()
             // Cancelling mid-wave leaves the copy on screen, which would freeze
             // the viewfinder on a stale frame until the next touch.
@@ -300,8 +308,12 @@ class CameraViewModel {
         case .ended:
             holdTask?.cancel()
             // A lift between the stages is the finger declining the second
-            // one; the rumble promising it stops with the finger.
+            // one; the rumble promising it, and the warming dots, stop with
+            // the finger.
             hapticManager.stopRisingRumble()
+            if holdStage == .tracking {
+                water.cool()
+            }
             water.lift()
             guard holdStage == .none else {
                 // The hold already chose; the lift just lets the water go. The
@@ -311,6 +323,7 @@ class CameraViewModel {
                 water.settle()
                 return
             }
+            isFollowMetering = false
             cameraService.focus(at: devicePoint)
             hapticManager.impact(.light)
             onFocusEvent?(.tapped)
@@ -327,6 +340,9 @@ class CameraViewModel {
             // what it grabbed — the system took the finger, not the subject.
             holdTask?.cancel()
             hapticManager.stopRisingRumble()
+            if holdStage == .tracking {
+                water.cool()
+            }
             water.lift()
             water.settle()
         }
@@ -345,19 +361,25 @@ class CameraViewModel {
             guard await cameraService.beginTracking(at: latestDevicePoint) else { return }
             guard !Task.isCancelled else { return }
             holdStage = .tracking
+            // A grab is the first stage, whatever the previous hold reached.
+            isFollowMetering = false
             hapticManager.impact(.medium)
             onFocusEvent?(.subjectGrabbed)
 
-            // A beat of quiet, then the wait for the second stage is felt: a
-            // rumble swells under the finger for exactly that long, so the
-            // impact that ends it arrives as a peak rather than a surprise.
+            // A beat of quiet, then the wait for the second stage is felt and
+            // seen: a rumble swells under the finger for exactly that long,
+            // and the dots under it warm from white to yellow over the same
+            // time, so the impact that ends it arrives as a peak rather than
+            // a surprise.
             try? await Task.sleep(for: .seconds(Self.holdQuietSeconds))
             guard !Task.isCancelled else { return }
             hapticManager.prepare(.heavy)
             hapticManager.startRisingRumble(over: Self.holdToFollowMeterSeconds)
+            water.warm(over: Self.holdToFollowMeterSeconds)
             try? await Task.sleep(for: .seconds(Self.holdToFollowMeterSeconds))
             guard !Task.isCancelled else { return }
             holdStage = .following
+            isFollowMetering = true
             hapticManager.impact(.heavy)
             onFocusEvent?(.followMeteringArmed)
             // The hold is complete, so the water lets the finger go here,

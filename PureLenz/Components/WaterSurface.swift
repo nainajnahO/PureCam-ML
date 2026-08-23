@@ -144,6 +144,10 @@ struct WaterField {
     /// `WaterTuning.breathePeriod`). The trace says where the light is; this
     /// says how much of it there is.
     var breath: Double = 1
+    /// 0…1, one value for the whole patch: how far the dots have gone from
+    /// white toward yellow. 0 until a hold's second stage is on its way
+    /// (`WaterSurface.warm`), rising over that wait, 1 once it has landed.
+    var warmth: Double = 0
     var cellsWide = 0
     var cellsHigh = 0
     var dent: Dent?
@@ -278,6 +282,10 @@ final class WaterSurface: NSObject {
     /// When the marking will end: the bottom of the breath that was under way
     /// when `settle()` was called. Nil while nothing has asked to settle.
     @ObservationIgnored private var settleAt: CFTimeInterval?
+    /// When the dots began warming from white toward yellow, and how long
+    /// the warming takes. Nil while the dots are white.
+    @ObservationIgnored private var warmingStart: CFTimeInterval?
+    @ObservationIgnored private var warmingDuration: CFTimeInterval = 1
     @ObservationIgnored private var link: CADisplayLink?
 
     private static let substepDuration = 1 / WaterTuning.substepRate
@@ -331,6 +339,8 @@ final class WaterSurface: NSObject {
         // A new press is the focus now; a settle still pending from the last
         // one must not end this patch mid-breath.
         settleAt = nil
+        // And it starts white, whatever the last one warmed to.
+        warmingStart = nil
         guard isCalm else { return }
 
         isCalm = false
@@ -370,12 +380,28 @@ final class WaterSurface: NSObject {
         settleAt = liftedAt + trough * WaterTuning.breathePeriod
     }
 
+    /// The dots under the finger begin turning from white to yellow, reaching
+    /// yellow after `duration` — the wait for a hold's second stage, so the
+    /// colour arrives with the stage. They stay yellow from then on, through
+    /// the lift and the fade, until the next press starts white again.
+    func warm(over duration: TimeInterval) {
+        warmingStart = CACurrentMediaTime()
+        warmingDuration = duration
+    }
+
+    /// Back to white at once — the second stage was declined partway.
+    func cool() {
+        warmingStart = nil
+    }
+
     /// Flatten everything and stop, immediately — for leaving the foreground,
     /// where a surface left mid-wave would otherwise resume on return.
     func reset() {
         pressed = false
         marking = false
         settleAt = nil
+        warmingStart = nil
+        field.warmth = 0
         link?.invalidate()
         link = nil
         for i in height.indices {
@@ -421,6 +447,9 @@ final class WaterSurface: NSObject {
         field.slopes = slopes
         field.trace = trace
         field.breath = pressed ? 1 : breath(sinceLift: link.timestamp - liftedAt)
+        field.warmth = warmingStart.map { start in
+            min(1, max(0, (link.timestamp - start) / warmingDuration))
+        } ?? 0
 
         if let settleAt, !pressed, link.timestamp >= settleAt {
             // Bottom of the last breath: the marking ends here, and the tail's

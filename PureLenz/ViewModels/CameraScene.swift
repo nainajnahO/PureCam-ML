@@ -64,13 +64,12 @@ final class CameraScene {
         // The light meter follows the lens: a tap or a grabbed subject is
         // re-metered once (spot metering, #24); a held subject is re-metered
         // for as long as it is tracked (#25). A tap ends any following, since
-        // it ends the tracking the following rides on.
+        // it ends the tracking the following rides on; a fresh grab ends it
+        // too — the grab is the first stage, and following is the second.
         cameraVM.onFocusEvent = { event in
             switch event {
-            case .tapped:
+            case .tapped, .subjectGrabbed:
                 autoExposure.stopFollowMetering()
-                autoExposure.meterAtFocusedPoint()
-            case .subjectGrabbed:
                 autoExposure.meterAtFocusedPoint()
             case .followMeteringArmed:
                 autoExposure.startFollowMetering()
