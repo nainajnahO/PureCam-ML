@@ -477,8 +477,11 @@ class CameraService: NSObject {
                 let fresh = self.latestSubjectsAt.map {
                     $0.duration(to: .now) < .seconds(Self.subjectLossGraceSeconds)
                 } ?? false
+                // `objectID` is -1 for an object the ISP did not assign one;
+                // there is nothing to follow such an object by, and it would
+                // match every other unassigned one.
                 let subject = fresh ? self.latestSubjects
-                    .filter { $0.bounds.contains(devicePoint) }
+                    .filter { $0.objectID >= 0 && $0.bounds.contains(devicePoint) }
                     .min { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height }
                     : nil
                 guard let subject else {
