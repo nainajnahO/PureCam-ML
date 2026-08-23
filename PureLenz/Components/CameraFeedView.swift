@@ -17,16 +17,38 @@
 import SwiftUI
 import AVFoundation
 
-/// The outline that rides on a tracked subject: a thin light ring, sized to
-/// the subject's box. Quiet on purpose — it sits on a face for as long as the
-/// subject is held, so it has to be something the eye can look past.
+/// The marker that rides on a tracked subject: four thin corner brackets at
+/// the subject's box. Corners only, no sides — it sits on a face for as long
+/// as the subject is held, so it has to be something the eye can look past,
+/// and an open frame hides less of what it frames.
 private struct TrackingMarker: View {
     var body: some View {
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .strokeBorder(.white.opacity(0.85), lineWidth: 1.5)
+        CornerBrackets()
+            .stroke(.white.opacity(0.85), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
             // Legible over a bright subject, without a dark outline that
             // would read as a drawn box.
             .shadow(color: .black.opacity(0.35), radius: 2)
+    }
+}
+
+/// Four L-shaped corners of a rect, each arm a fifth of the shorter side
+/// (capped, so a full-frame box does not get arms the size of a thumb).
+/// SwiftUI has no open-cornered frame shape; this is the few lines it takes.
+private struct CornerBrackets: Shape {
+    func path(in rect: CGRect) -> Path {
+        let arm = min(min(rect.width, rect.height) * 0.2, 28)
+        var path = Path()
+        for (corner, dx, dy) in [
+            (CGPoint(x: rect.minX, y: rect.minY), arm, arm),
+            (CGPoint(x: rect.maxX, y: rect.minY), -arm, arm),
+            (CGPoint(x: rect.maxX, y: rect.maxY), -arm, -arm),
+            (CGPoint(x: rect.minX, y: rect.maxY), arm, -arm),
+        ] {
+            path.move(to: CGPoint(x: corner.x, y: corner.y + dy))
+            path.addLine(to: corner)
+            path.addLine(to: CGPoint(x: corner.x + dx, y: corner.y))
+        }
+        return path
     }
 }
 
