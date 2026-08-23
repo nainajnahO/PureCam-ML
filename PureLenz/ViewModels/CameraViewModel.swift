@@ -116,8 +116,10 @@ class CameraViewModel {
     private static let holdToTrackSeconds: TimeInterval = 0.5
 
     /// Further seconds of holding before the second stage — the light meter
-    /// starts following the subject too.
-    private static let holdToFollowMeterSeconds: TimeInterval = 0.5
+    /// starts following the subject too. Twice the first wait: a hold that
+    /// only wants to track should be able to lift without brushing the
+    /// second stage, and the rumble that fills this wait needs room to rise.
+    private static let holdToFollowMeterSeconds: TimeInterval = 1.0
 
     /// How far the finger may drift, in points, and still count as holding
     /// still. A finger resting on glass is never perfectly still.
@@ -252,8 +254,9 @@ class CameraViewModel {
     ///
     /// A finger that stays put is a hold instead, in two stages, each announced
     /// by its own haptic: half a second grabs the subject under the finger and
-    /// the lens follows it; half a second more and the light meter follows it
-    /// too. A hold over nothing the camera recognises stays a tap. Whatever
+    /// the lens follows it; a second more — under a rumble that swells the
+    /// whole way — and the light meter follows it too. A hold over nothing
+    /// the camera recognises stays a tap. Whatever
     /// stage the hold reached persists after the lift — both hands are free
     /// to shoot — until the next tap, or the subject leaves the frame.
     ///
@@ -291,6 +294,9 @@ class CameraViewModel {
 
         case .ended:
             holdTask?.cancel()
+            // A lift between the stages is the finger declining the second
+            // one; the rumble promising it stops with the finger.
+            hapticManager.stopRisingRumble()
             water.lift()
             guard holdStage == .none else {
                 // The hold already chose; the lift just lets the water go. The
@@ -313,6 +319,7 @@ class CameraViewModel {
             // lens that was never asked. A hold that had already grabbed keeps
             // what it grabbed — the system took the finger, not the subject.
             holdTask?.cancel()
+            hapticManager.stopRisingRumble()
             water.lift()
             water.settle()
         }
@@ -334,7 +341,11 @@ class CameraViewModel {
             hapticManager.impact(.medium)
             onFocusEvent?(.subjectGrabbed)
 
+            // The wait for the second stage is felt, not silent: a rumble
+            // swells under the finger for exactly this long, so the impact
+            // that ends it arrives as a peak rather than a surprise.
             hapticManager.prepare(.heavy)
+            hapticManager.startRisingRumble(over: Self.holdToFollowMeterSeconds)
             try? await Task.sleep(for: .seconds(Self.holdToFollowMeterSeconds))
             guard !Task.isCancelled else { return }
             holdStage = .following
