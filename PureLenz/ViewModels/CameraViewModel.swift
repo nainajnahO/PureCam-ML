@@ -306,6 +306,8 @@ class CameraViewModel {
             guard holdStage == .none else {
                 // The hold already chose; the lift just lets the water go. The
                 // lit patch fades on its own, the tracking marker takes over.
+                // (After the second stage the water was let go already, and
+                // both of these are no-ops.)
                 water.settle()
                 return
             }
@@ -358,6 +360,13 @@ class CameraViewModel {
             holdStage = .following
             hapticManager.impact(.heavy)
             onFocusEvent?(.followMeteringArmed)
+            // The hold is complete, so the water lets the finger go here,
+            // not when it actually lifts: the dent rebounds into its ring and
+            // the lit patch breathes out, the same release a lift would play.
+            // The finger still on the glass is no longer pressing anything —
+            // `move` ignores it, and the real lift finds nothing left to do.
+            water.lift()
+            water.settle()
         }
     }
 
