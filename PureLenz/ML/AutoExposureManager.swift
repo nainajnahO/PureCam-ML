@@ -229,6 +229,32 @@ class AutoExposureManager {
         )
     }
 
+    /// Re-run inference because the metering point moved: a tap landed focus,
+    /// and `frame` carries the tapped point for the model to meter at.
+    ///
+    /// Only while the model is the one holding the exposure (`.applied`).
+    /// Not after a manual knob drag — `.manualOverride` means the user's
+    /// setting wins for the session, and a tap still focuses but leaves it
+    /// alone; long-press (`runManualInference`) stays the explicit way to ask
+    /// the AI back. And not from `.ready`, which is "loaded but not yet asked":
+    /// either the startup inference is about to run and will see the tap
+    /// itself, or auto-exposure on launch is switched off and the user chose
+    /// the metered exposure.
+    /// - Parameter frame: Live camera preview frame plus the exposure and metering point it was captured with
+    /// - Returns: (iso, shutterSeconds) if successful, nil otherwise
+    func runFocusInference(from frame: CameraService.CapturedFrame) -> (iso: Float, shutterSeconds: Double)? {
+        guard state == .applied,
+              let isoModel = isoModel,
+              let shutterModel = shutterModel else {
+            Logger.ml.debug("Skipping spot re-metering - model is not holding the exposure")
+            return nil
+        }
+
+        return performInference(
+            from: frame, isoModel: isoModel, shutterModel: shutterModel, label: "Spot"
+        )
+    }
+
     /// Shared body of startup and manual inference: extract features, run the
     /// two-stage prediction, and drive the `state` transitions. `label`
     /// prefixes the log lines.
@@ -245,10 +271,22 @@ class AutoExposureManager {
         guard let features = featureExtractor.extract(
             from: frame.image,
             frameISO: frame.iso,
-            frameShutterSeconds: frame.shutterSeconds
+            frameShutterSeconds: frame.shutterSeconds,
+            meteringPoint: frame.meteringPoint
         ) else {
             state = .error("Feature extraction failed")
             return nil
+        }
+
+        // Spot against centre, so a tap's effect on the reading can be checked
+        // from the log: a tap on the dark subject of a bright scene must read
+        // darker here than the centre does.
+        if let point = frame.meteringPoint {
+            Logger.ml.info("""
+                Metering at spot (\(point.x, format: .fixed(precision: 2)), \(point.y, format: .fixed(precision: 2))): \
+                spot \(features.spotLuminance, format: .fixed(precision: 3)), \
+                centre \(features.centerWeightedLuminance, format: .fixed(precision: 3))
+                """)
         }
 
         // 2. SEQUENTIAL PREDICTION
@@ -354,7 +392,8 @@ class AutoExposureManager {
         guard let extracted = featureExtractor.extractWithThumbnail(
             from: frame.image,
             frameISO: frame.iso,
-            frameShutterSeconds: frame.shutterSeconds
+            frameShutterSeconds: frame.shutterSeconds,
+            meteringPoint: frame.meteringPoint
         ) else { return }
 
         // Label with the frame's own exposure, not the cached

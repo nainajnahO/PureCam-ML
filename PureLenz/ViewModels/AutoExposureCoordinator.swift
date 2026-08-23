@@ -57,6 +57,10 @@ class AutoExposureCoordinator: NSObject {
     /// the previous one instead of queueing a redundant frame capture.
     private var startupInferenceTask: Task<Void, Never>?
 
+    /// The re-metering waiting on the lens after a tap; a newer tap supersedes
+    /// it, the same way a newer press supersedes the water's settle.
+    private var focusInferenceTask: Task<Void, Never>?
+
     // MARK: - Initialization
 
     init(
@@ -73,6 +77,7 @@ class AutoExposureCoordinator: NSObject {
     deinit {
         exposureRampLink?.invalidate()
         startupInferenceTask?.cancel()
+        focusInferenceTask?.cancel()
     }
 
     // MARK: - Public Methods
@@ -90,6 +95,9 @@ class AutoExposureCoordinator: NSObject {
     /// discovering it had nothing to do.
     func handleScenePhaseChange(_ newPhase: ScenePhase) {
         startupInferenceTask?.cancel()
+        // Leaving the foreground releases the tapped focus (CameraViewModel), so
+        // a re-metering still waiting on it would meter a point no longer held.
+        focusInferenceTask?.cancel()
         guard newPhase == .active else { return }
         autoExposureManager.resetForNewSession()
 
@@ -137,6 +145,38 @@ class AutoExposureCoordinator: NSObject {
                 }
             } else {
                 Logger.ml.debug("Manual inference failed - models not ready")
+            }
+        }
+    }
+
+    /// Re-meter at the tapped focus point once the lens has landed there.
+    ///
+    /// Spot metering rides on focus: every frame delivered while a tapped focus
+    /// is in effect carries the point (`CameraService.CapturedFrame`), and the
+    /// extractor meters `spotLuminance` there. So this only has to ask for a
+    /// frame at the right moment and run the model on it. The right moment is
+    /// after the scan has settled, for two reasons: the frame must be captured
+    /// after `focus(at:)` has run on the session queue, or it would carry the
+    /// previous tap's point or none at all — `awaitFocusSettled` is ordered
+    /// behind the tap's `focus(at:)` — and the picture the model meters should
+    /// be the sharp one.
+    ///
+    /// The gate on whether to re-run at all lives in the manager
+    /// (`runFocusInference`): only while the model holds the exposure, never
+    /// over a manual knob setting.
+    func meterAtFocusedPoint() {
+        focusInferenceTask?.cancel()
+        focusInferenceTask = Task { [weak self] in
+            guard let self else { return }
+            await cameraService.awaitFocusSettled()
+            guard !Task.isCancelled else { return }
+            guard let frame = await cameraService.captureNextFrame() else {
+                Logger.ml.debug("No preview frame available for spot re-metering")
+                return
+            }
+            guard !Task.isCancelled else { return }
+            if let prediction = autoExposureManager.runFocusInference(from: frame) {
+                applyAIPrediction(iso: prediction.iso, shutter: prediction.shutterSeconds)
             }
         }
     }

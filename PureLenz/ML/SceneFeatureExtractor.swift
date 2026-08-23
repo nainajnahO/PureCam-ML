@@ -53,10 +53,21 @@ class SceneFeatureExtractor {
     ///   - ciImage: Live camera preview or captured image
     ///   - frameISO: ISO the frame was captured with (for scene-light normalization)
     ///   - frameShutterSeconds: Exposure duration the frame was captured with
+    ///   - meteringPoint: Tapped focus point to spot-meter at, normalized with
+    ///     (0,0) the top-left of `ciImage` as rendered; nil meters from the centre
     /// - Returns: SceneFeatures if successful, nil otherwise
-    func extract(from ciImage: CIImage, frameISO: Float, frameShutterSeconds: Double) -> SceneFeatures? {
+    func extract(
+        from ciImage: CIImage,
+        frameISO: Float,
+        frameShutterSeconds: Double,
+        meteringPoint: CGPoint? = nil
+    ) -> SceneFeatures? {
         extractWithThumbnail(
-            from: ciImage, frameISO: frameISO, frameShutterSeconds: frameShutterSeconds, includeThumbnail: false
+            from: ciImage,
+            frameISO: frameISO,
+            frameShutterSeconds: frameShutterSeconds,
+            meteringPoint: meteringPoint,
+            includeThumbnail: false
         )?.features
     }
 
@@ -75,6 +86,7 @@ class SceneFeatureExtractor {
         from ciImage: CIImage,
         frameISO: Float,
         frameShutterSeconds: Double,
+        meteringPoint: CGPoint? = nil,
         includeThumbnail: Bool = true
     ) -> (features: SceneFeatures, thumbnail: Data?)? {
         // A frame with unknown exposure can't be normalized into an absolute
@@ -105,14 +117,40 @@ class SceneFeatureExtractor {
         // 4. Extract color info
         let colorInfo = extractColorInfo(from: downsampled)
 
-        // 5. Compute center-weighted luminance
-        let centerWeighted = computeCenterWeightedLuminance(
+        // 5. Center-weighted luminance: a broad Gaussian on the middle of the
+        //    frame, sigma a quarter of each axis (see computeWeightedLuminance).
+        let centerWeighted = computeWeightedLuminance(
             luminanceBuffer: luminance.values,
             width: luminance.width,
-            height: luminance.height
+            height: luminance.height,
+            center: CGPoint(x: 0.5, y: 0.5),
+            sigmaX: Float(luminance.width) / 4.0,
+            sigmaY: Float(luminance.height) / 4.0
         )
 
-        // 6. Normalize brightness by the frame's exposure to get absolute scene light
+        // 6. Spot luminance at the tapped point, when there is one. The spot is
+        //    round — one sigma on both axes, from the short edge — and much
+        //    tighter than the centre weighting: at σ = short edge / 8 the
+        //    region that dominates the reading covers roughly 6% of a 4:3
+        //    frame, the size of a face at arm's length rather than the sky
+        //    behind it. Untapped is an exact copy of the centre reading, which
+        //    is what keeps every frame without a tap bit-identical to before.
+        let spot: Float
+        if let meteringPoint {
+            let spotSigma = Float(min(luminance.width, luminance.height)) / 8.0
+            spot = computeWeightedLuminance(
+                luminanceBuffer: luminance.values,
+                width: luminance.width,
+                height: luminance.height,
+                center: meteringPoint,
+                sigmaX: spotSigma,
+                sigmaY: spotSigma
+            )
+        } else {
+            spot = centerWeighted
+        }
+
+        // 7. Normalize brightness by the frame's exposure to get absolute scene light
         let sceneLight = SceneFeatures.computeSceneLightLevel(
             meanLuminance: stats.mean,
             iso: frameISO,
@@ -134,7 +172,10 @@ class SceneFeatureExtractor {
             saturation: colorInfo.saturation,
             centerWeightedLuminance: centerWeighted,
             sceneLightLevel: sceneLight,
-            timestamp: Date()
+            spotLuminance: spot,
+            hasSpotMeter: meteringPoint == nil ? 0 : 1,
+            timestamp: Date(),
+            meteringPoint: meteringPoint
         )
 
         let elapsed = start.duration(to: .now)
@@ -385,35 +426,47 @@ class SceneFeatureExtractor {
         }
     }
 
-    /// Compute center-weighted luminance using Gaussian weighting.
-    /// Mimics traditional center-weighted metering in photography: the middle
-    /// of the frame counts for more than the edges.
+    /// Gaussian-weighted mean luminance around a point: the metering behind
+    /// both `centerWeightedLuminance` (broad, on the middle) and `spotLuminance`
+    /// (tight, on the tapped point).
     ///
-    /// Sigma is a quarter of *each* axis, so the frame edge sits at 2σ (~13.5%
-    /// weight) on both axes whatever the aspect ratio. That is the same
-    /// relationship the original square-only code had, generalized per axis
-    /// rather than replaced — a square buffer produces identical weights.
+    /// `center` is normalized with (0,0) the top-left pixel row and column of
+    /// the buffer — the same convention as `AVCaptureDevice.focusPointOfInterest`
+    /// on the native sensor frame, so a tapped focus point passes straight
+    /// through. A centre of (0.5, 0.5) lands on `width * 0.5`, which is exactly
+    /// the `width / 2` the centre weighting has always used — the generalization
+    /// changes nothing for untapped frames.
+    ///
+    /// For the centre weighting sigma is a quarter of *each* axis, so the frame
+    /// edge sits at 2σ (~13.5% weight) on both axes whatever the aspect ratio —
+    /// the same relationship the original square-only code had.
     ///
     /// The 2D Gaussian is separable — exp(-(dx²/2σx² + dy²/2σy²)) factors into
     /// exp(-dx²/2σx²)·exp(-dy²/2σy²) — so the two 1D profiles cost width+height
     /// `exp` calls instead of width×height (≈450 instead of ≈49,000), and the
-    /// weighted sum becomes one vDSP dot product per row. No cached state, so
-    /// the extractor stays free of shared mutable data.
-    private func computeCenterWeightedLuminance(
+    /// weighted sum becomes one vDSP dot product per row. The normalization is
+    /// the sum of the weights actually inside the buffer, so a spot near an
+    /// edge is a mean over the part of its Gaussian that exists rather than a
+    /// reading darkened by the part that falls outside. No cached state, so the
+    /// extractor stays free of shared mutable data.
+    private func computeWeightedLuminance(
         luminanceBuffer: [Float],
         width: Int,
-        height: Int
+        height: Int,
+        center: CGPoint,
+        sigmaX: Float,
+        sigmaY: Float
     ) -> Float {
         guard width > 0, height > 0, luminanceBuffer.count == width * height else { return 0 }
 
-        let sigmaX = Float(width) / 4.0
-        let sigmaY = Float(height) / 4.0
+        let centerX = Float(width) * Float(center.x)
+        let centerY = Float(height) * Float(center.y)
         let weightsX = (0..<width).map { x -> Float in
-            let dx = Float(x) - Float(width) / 2.0
+            let dx = Float(x) - centerX
             return exp(-(dx * dx) / (2 * sigmaX * sigmaX))
         }
         let weightsY = (0..<height).map { y -> Float in
-            let dy = Float(y) - Float(height) / 2.0
+            let dy = Float(y) - centerY
             return exp(-(dy * dy) / (2 * sigmaY * sigmaY))
         }
 

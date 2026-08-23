@@ -78,6 +78,16 @@ class CameraService: NSObject {
         let image: CIImage
         let iso: Float
         let shutterSeconds: Double
+
+        /// The tapped focus point in effect when the frame was delivered, or nil
+        /// while the lens is in continuous AF. Spot metering rides on focus: the
+        /// model meters `SceneFeatures.spotLuminance` here.
+        ///
+        /// In `focusPointOfInterest`'s normalized device coordinates — (0,0)
+        /// top-left, (1,1) bottom-right of the native sensor frame — which is
+        /// also how `image` arrives: the video output has no rotation applied, so
+        /// its buffer is that same native frame and the point indexes it directly.
+        let meteringPoint: CGPoint?
     }
 
     // On-demand frame delivery: the video output does no per-frame work until
@@ -340,7 +350,9 @@ class CameraService: NSObject {
     /// flips to `.continuousAutoExposure`. This deliberately does not: exposure is
     /// owned by the app (`AutoExposureCoordinator` and the manual knob) via
     /// `setExposureModeCustom`, so handing metering back to the ISP here would throw
-    /// away the model's decision on every tap.
+    /// away the model's decision on every tap. The model meters at the tapped
+    /// point instead — every `CapturedFrame` delivered while this focus is in
+    /// effect carries it as `meteringPoint`, until `releaseFocus()` lets go.
     func focus(at devicePoint: CGPoint) {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
@@ -970,13 +982,26 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
             frameShutter = (exif[kCGImagePropertyExifExposureTime] as? NSNumber)?
                 .doubleValue ?? 0
         }
-        if frameISO <= 0 || frameShutter <= 0,
-           let device = (session.inputs.first as? AVCaptureDeviceInput)?.device {
+        let device = (session.inputs.first as? AVCaptureDeviceInput)?.device
+        if frameISO <= 0 || frameShutter <= 0, let device {
             frameISO = device.iso
             frameShutter = device.exposureDuration.seconds
         }
 
-        let frame = CapturedFrame(image: ciImage, iso: frameISO, shutterSeconds: frameShutter)
+        // A tapped focus is in effect exactly while subject-area monitoring is
+        // on: `focus(at:)` is the only thing that switches it on and
+        // `releaseFocus()` the only thing that switches it off, so the flag is
+        // app-owned truth. `focusMode` would not do — a device whose resting
+        // mode is not continuous would read as permanently tapped at the centre.
+        // Read here, on the frame's own queue, so the point travels with the
+        // frame it applies to rather than whatever is true when ML gets to it.
+        let meteringPoint = device.flatMap { device in
+            device.isSubjectAreaChangeMonitoringEnabled ? device.focusPointOfInterest : nil
+        }
+
+        let frame = CapturedFrame(
+            image: ciImage, iso: frameISO, shutterSeconds: frameShutter, meteringPoint: meteringPoint
+        )
 
         let requests = pendingFrameRequests
         pendingFrameRequests.removeAll()
