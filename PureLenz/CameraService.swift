@@ -96,6 +96,18 @@ class CameraService: NSObject {
     /// Touched only on `sessionQueue`.
     private var trackedObjectID: Int?
 
+    /// The tracked subject's box as the app follows it: eased toward each
+    /// new reading rather than snapped to it (see `subjectSighted`). And the
+    /// last box handed to the marker, so the marker only hears about real
+    /// movement. Both nil while nothing is tracked; `sessionQueue` only.
+    private var smoothedSubjectBounds: CGRect?
+    private var publishedSubjectBounds: CGRect?
+
+    /// How far, per sighting, the followed box moves toward the ISP's new
+    /// reading. At ~30 sightings a second, 0.2 puts the box about 0.15s
+    /// behind a moving subject, and a one-frame twitch at a fifth of its size.
+    private static let subjectSmoothing: CGFloat = 0.2
+
     /// Pending "the subject is gone" verdict. Re-armed on every sighting, so it
     /// only fires once the subject has been absent for `subjectLossGraceSeconds`.
     /// Touched only on `sessionQueue`.
@@ -509,6 +521,12 @@ class CameraService: NSObject {
                     return continuation.resume(returning: false)
                 }
 
+                if self.trackedObjectID != subject.objectID {
+                    // A different subject: start its box fresh rather than
+                    // gliding there from the previous one's.
+                    self.smoothedSubjectBounds = nil
+                    self.publishedSubjectBounds = nil
+                }
                 self.trackedObjectID = subject.objectID
                 // `.public`: the type is an Apple constant, and which kinds of
                 // subject get grabbed in the field is the thing worth knowing.
@@ -523,7 +541,26 @@ class CameraService: NSObject {
     /// and the meter, show it to the UI, and push back the moment tracking
     /// would give up on it. On `sessionQueue`.
     private func subjectSighted(_ subject: AVMetadataObject) {
-        let centre = CGPoint(x: subject.bounds.midX, y: subject.bounds.midY)
+        // The ISP's box twitches by a pixel or two from frame to frame even
+        // on a subject standing still. Ease toward each new reading instead
+        // of adopting it, so the box settles a few frames behind the subject
+        // and the twitching averages out; everything downstream — lens,
+        // meter, marker — follows the eased box.
+        let raw = subject.bounds
+        let bounds: CGRect
+        if let previous = smoothedSubjectBounds {
+            let k = Self.subjectSmoothing
+            bounds = CGRect(
+                x: previous.minX + (raw.minX - previous.minX) * k,
+                y: previous.minY + (raw.minY - previous.minY) * k,
+                width: previous.width + (raw.width - previous.width) * k,
+                height: previous.height + (raw.height - previous.height) * k
+            )
+        } else {
+            bounds = raw
+        }
+        smoothedSubjectBounds = bounds
+        let centre = CGPoint(x: bounds.midX, y: bounds.midY)
 
         if let input = session.inputs.first as? AVCaptureDeviceInput {
             let device = input.device
@@ -540,9 +577,20 @@ class CameraService: NSObject {
         }
         setMeteringPoint(centre)
 
-        let bounds = subject.bounds
-        DispatchQueue.main.async { [weak self] in
-            self?.trackedSubjectBounds = bounds
+        // The marker gets a new box only when the eased one has moved or
+        // resized by more than the same 1% the lens waits for — a box that
+        // holds still on a still subject, and glides when the subject moves.
+        let published = publishedSubjectBounds
+        let moved = published.map { previous in
+            hypot(bounds.midX - previous.midX, bounds.midY - previous.midY) > Self.focusRepointThreshold
+                || abs(bounds.width - previous.width) > Self.focusRepointThreshold
+                || abs(bounds.height - previous.height) > Self.focusRepointThreshold
+        } ?? true
+        if moved {
+            publishedSubjectBounds = bounds
+            DispatchQueue.main.async { [weak self] in
+                self?.trackedSubjectBounds = bounds
+            }
         }
 
         subjectLossTimer?.cancel()
@@ -560,6 +608,8 @@ class CameraService: NSObject {
     private func stopTracking() {
         guard trackedObjectID != nil else { return }
         trackedObjectID = nil
+        smoothedSubjectBounds = nil
+        publishedSubjectBounds = nil
         subjectLossTimer?.cancel()
         subjectLossTimer = nil
         DispatchQueue.main.async { [weak self] in

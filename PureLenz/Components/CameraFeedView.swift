@@ -131,7 +131,10 @@ struct CameraFeedView: View {
                         TrackingMarker()
                             .frame(width: rect.width, height: rect.height)
                             .position(x: rect.midX, y: rect.midY)
-                            .animation(.smooth(duration: 0.2), value: rect)
+                            // Each new box is a real move (CameraService holds
+                            // back the twitches), so a longer glide between
+                            // them reads as following rather than hopping.
+                            .animation(.smooth(duration: 0.35), value: rect)
                             .transition(.opacity.combined(with: .scale(scale: 1.15)))
                             .allowsHitTesting(false)
                     }
