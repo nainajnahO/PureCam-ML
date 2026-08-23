@@ -37,6 +37,11 @@ final class HapticManager {
     /// rebuilt on engine reset) instead of per click.
     private var detentClickPlayer: CHHapticPatternPlayer?
 
+    /// The rumble that swells between a hold's two stages (`startRisingRumble`).
+    /// Not cached: the rise is baked into the pattern as a curve over the
+    /// hold's own wait, and it plays once per hold, not per frame.
+    private var risingRumblePlayer: CHHapticPatternPlayer?
+
     private var isRumbling = false
 
     /// The one-shot impact strengths this app uses. A dedicated enum rather
@@ -245,11 +250,79 @@ final class HapticManager {
         }
     }
 
+    // MARK: - Hold Haptics (Rising Rumble)
+
+    /// Start a rumble that swells from almost nothing to full over `duration`
+    /// — the wait between a hold's first stage and its second, so the finger
+    /// is told something more is on its way. Ends on its own as the duration
+    /// runs out, which is when the second stage's impact lands; a finger that
+    /// lifts first cuts it off with `stopRisingRumble`.
+    ///
+    /// The whole rise is a parameter curve inside the pattern: Core Haptics
+    /// plays the ramp itself, with nothing driving it from the app. The curve
+    /// bows downward — slow to build, then steep — because a straight ramp
+    /// spends its first half below what a resting finger notices.
+    func startRisingRumble(over duration: TimeInterval) {
+        guard let engine else { return }
+        stopRisingRumble()
+
+        let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 1.0)
+        let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.3)
+        let event = CHHapticEvent(
+            eventType: .hapticContinuous,
+            parameters: [intensity, sharpness],
+            relativeTime: 0,
+            duration: duration
+        )
+        // Intensity control scales the event's intensity; sharpness control
+        // is added to its sharpness. So this runs 0.05 → 1.0 in strength and
+        // 0.3 → 0.8 in sharpness: a soft hum that hardens as it grows.
+        let rise = CHHapticParameterCurve(
+            parameterID: .hapticIntensityControl,
+            controlPoints: [
+                .init(relativeTime: 0, value: 0.05),
+                .init(relativeTime: duration * 0.5, value: 0.3),
+                .init(relativeTime: duration, value: 1.0),
+            ],
+            relativeTime: 0
+        )
+        let sharpen = CHHapticParameterCurve(
+            parameterID: .hapticSharpnessControl,
+            controlPoints: [
+                .init(relativeTime: 0, value: 0),
+                .init(relativeTime: duration, value: 0.5),
+            ],
+            relativeTime: 0
+        )
+
+        do {
+            let pattern = try CHHapticPattern(events: [event], parameterCurves: [rise, sharpen])
+            let player = try engine.makePlayer(with: pattern)
+            try player.start(atTime: CHHapticTimeImmediate)
+            risingRumblePlayer = player
+        } catch {
+            Logger.haptics.error("Failed to play rising rumble: \(error.localizedDescription)")
+        }
+    }
+
+    /// Cut the rising rumble short. Safe to call when none is playing, and
+    /// after one has already ended on its own.
+    func stopRisingRumble() {
+        guard let player = risingRumblePlayer else { return }
+        risingRumblePlayer = nil
+        do {
+            try player.stop(atTime: CHHapticTimeImmediate)
+        } catch {
+            Logger.haptics.error("Failed to stop rising rumble: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Lifecycle
 
     /// Stop engine when app backgrounds
     func stop() {
         stopShutterRumble()
+        stopRisingRumble()
         engine?.stop()
     }
 

@@ -116,15 +116,21 @@ private struct RippleDotMatrix: View {
     /// Grid pitch, in points.
     private static let spacing: CGFloat = 7
     private static let dotDiameter: CGFloat = 2
-    /// White pushed two stops past SDR white. `headroom(_:)` annotates the
-    /// extended-range components so the renderer raises display headroom (or
-    /// tone-maps) instead of clamping.
-    private static let hdrWhite = Color(.sRGBLinear, red: 4, green: 4, blue: 4)
-        .headroom(4)
+    /// The dots' colour this frame: white pushed two stops past SDR white,
+    /// warmed toward the same push of the shutter dial's yellow by
+    /// `field.warmth` (system yellow is sRGB (1, 0.8, 0), which is (1, 0.6, 0)
+    /// linear). `headroom(_:)` annotates the extended-range components so the
+    /// renderer raises display headroom (or tone-maps) instead of clamping.
+    private var dotColor: Color {
+        let w = field.warmth
+        return Color(.sRGBLinear, red: 4, green: 4 - 1.6 * w, blue: 4 - 4 * w)
+            .headroom(4)
+    }
     /// Below this a dot is invisible even as a two-stops-up white.
     private static let visible: Double = 1 / 255
 
     var body: some View {
+        let color = dotColor
         Canvas { context, size in
             let columns = Int(size.width / Self.spacing)
             let rows = Int(size.height / Self.spacing)
@@ -161,7 +167,7 @@ private struct RippleDotMatrix: View {
                     context.opacity = glow * field.breath
                     context.fill(
                         Path(ellipseIn: rect),
-                        with: .color(Self.hdrWhite)
+                        with: .color(color)
                     )
                 }
             }
